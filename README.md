@@ -14,18 +14,6 @@ DJI Action 1 反向导入工具
 
 ---
 
-使用方法
-
-下载ffmpeg
-打开解压后的文件夹，找到 bin 子文件夹，里面应该有三个文件：ffmpeg.exe、ffprobe.exe、ffplay.exe。把这两个（ffmpeg.exe 和 ffprobe.exe）直接复制到文件夹里。这样就不用折腾环境变量了，命令行在那个文件夹里能直接调用到。把你要转换的视频放入文件中，我已经把一个大疆原生拍摄的视频放入项目中了，无需再次导入，你只需要再导入你要转换的视频以及ffmpeg的两个文件
-确认文件夹里现在有哪些东西
-这时候那个文件夹里应该有：dji_graft.py、box_tools.py、ffmpeg.exe、ffprobe.exe，加上你的参考视频和要导入的第三方视频，一共六个文件都在同一层。
-测试 ffmpeg 能不能跑
-在这个文件夹的地址栏里输入 cmd 回车，会弹出一个已经定位到这里的命令行窗口。先输入 ffmpeg -version 回车测试一下，能看到版本号输出就说明这个文件夹里的 ffmpeg.exe 可以正常调用了。
-运行转换脚本
-确认没问题后，输入： python3 dji_graft.py --ref DJI_0819.MP4 --input 你的第三方视频.mp4 --output DJI_0900.MP4 （如果提示 python3 不是内部命令，换成 python 重试）。把文件名换成你自己的实际文件名就行。
----
-
 依赖安装
 
 需要安装 Python 3.8+
