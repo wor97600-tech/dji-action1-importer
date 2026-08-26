@@ -22,13 +22,8 @@ DJI Action 1 反向导入工具
 
 依赖安装
 
-需要安装 Python 3.8+
-下载地址：https://python.org
-
 需要安装 ffmpeg
 下载地址：https://www.gyan.dev/ffmpeg/builds/
-
-下载后把 ffmpeg.exe 放到项目文件夹里的 ffmpeg/bin/ 目录下
 
 ---
 
