@@ -16,9 +16,19 @@ DJI Action 1 反向导入工具
 
 使用方法
 
-只需要下载exe文件
-使用时去ffmpeg官网下载把ffmpeg.exe 和 ffprobe.exe和exe文件放在同一个文件夹即可使用
----
+## 快速开始（给普通用户）
+
+1. 下载本仓库的 `dji_graft_gui.exe`
+2. 去 [ffmpeg 下载页](https://www.gyan.dev/ffmpeg/builds/) 下载 `ffmpeg-release-full.7z`，解压后把 `ffmpeg.exe` 和 `ffprobe.exe` 放到 **和 exe 同一个文件夹**里
+3. 双击 `dji_graft_gui.exe` 运行
+
+## 首次使用步骤
+
+1. 从你的 Action 1 相机里拷贝一个原生 MP4 文件作为“参考文件”
+2. 打开工具，选择参考文件
+3. 选择你要导入的第三方视频所在的文件夹
+4. 点击“开始转换”
+
 
 依赖安装
 
