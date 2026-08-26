@@ -1,32 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-batch_dji_graft.py — dji_graft.py 的批量版本。
-指定一个参考原生文件 + 一个装满第三方视频的文件夹，一次性把里面所有视频都
-转换成大疆相机能识别播放的格式，自动按顺序编号命名，方便直接整批拷进卡里。
-
-用法：
-    python3 batch_dji_graft.py --ref DJI_0819.MP4 --input-dir ./to_import \
-        --output-dir ./output --start 900
-
-    --ref          参考原生文件（拍摄自你要用的那台相机）
-    --input-dir    存放待转换第三方视频的文件夹
-    --output-dir   转换结果输出的文件夹（不存在会自动创建）
-    --start        起始编号，默认 900，即从 DJI_0900.MP4 开始往后编号
-                   （编号请接着卡里已有文件的最大编号来取，避免相机识别混乱）
-    --prefix       文件名前缀，默认 DJI_，一般不用改
-    --keep-temp    保留每个文件的中间转码结果，方便排查某个文件失败的原因
-    --continue-on-error  某个文件转换失败时跳过继续处理下一个（默认行为）
-
-支持的第三方视频后缀：.mp4 .mov .mkv .avi .m4v .ts .wmv .flv
-（只要 ffmpeg 能读的格式基本都行，这个列表只是用来筛选文件夹里哪些文件当作待处理项）
+batch_dji_graft.py — 批量版本 + 体积控制
 """
 import argparse
 import sys
 import traceback
 from pathlib import Path
 
-# 复用 dji_graft.py 里已经写好、测试过的核心函数
 from dji_graft import check_tools, get_ref_targets, transcode, graft
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".ts", ".wmv", ".flv"}
@@ -54,6 +35,10 @@ def main():
     ap.add_argument("--start", type=int, default=900, help="输出文件起始编号（默认 900）")
     ap.add_argument("--prefix", default="DJI_", help="输出文件名前缀（默认 DJI_）")
     ap.add_argument("--keep-temp", action="store_true", help="保留每个文件的中间转码结果")
+    ap.add_argument("--crf", type=int, default=None,
+                    help="使用 CRF 质量模式（推荐 23~28），体积通常比固定码率小 30%%-60%%")
+    ap.add_argument("--max-bitrate", type=int, default=None,
+                    help="手动限制视频峰值码率（kbps），例如 20000 表示 20Mbps")
     args = ap.parse_args()
 
     check_tools()
@@ -79,9 +64,14 @@ def main():
     targets = get_ref_targets(ref_path)
     print(f"目标规格: {targets['width']}x{targets['height']} @ {targets['fps']}fps, "
           f"音频 {targets['sample_rate']}Hz/{targets['channels']}ch")
+    
+    max_br = args.max_bitrate * 1000 if args.max_bitrate else None
+    crf_info = f"CRF={args.crf}" if args.crf is not None else "固定码率"
+    br_info = f"{args.max_bitrate}kbps" if args.max_bitrate else "参考文件码率"
+    print(f"体积控制: {crf_info}, 峰值上限={br_info}")
     print(f"共发现 {len(videos)} 个待转换文件，从编号 {args.start} 开始命名\n")
 
-    results = []  # (input_path, output_path_or_None, error_or_None)
+    results = []
     number = args.start
 
     for idx, video in enumerate(videos, 1):
@@ -92,15 +82,19 @@ def main():
         print(f"总进度 [{idx}/{len(videos)}] {format_batch_bar(idx - 1, len(videos))}")
         print(f"  {video.name}  ->  {out_name}")
         try:
-            transcode(video, tmp_path, targets, show_progress=True, label="转码中")
+            transcode(video, tmp_path, targets, show_progress=True, label="转码中",
+                      crf=args.crf, max_video_bitrate=max_br)
             print("  容器移植中...", end="", flush=True)
             graft(ref_path, tmp_path, out_path)
-            print("\r  完成 ✅                    ")
+            out_size = out_path.stat().st_size
+            in_size = video.stat().st_size
+            ratio = out_size / in_size if in_size > 0 else 0
+            print(f"\r  完成 ✅ ({out_size/1024/1024:.1f} MB, 比 {ratio:.2f}x)        ")
             results.append((video, out_path, None))
         except Exception as e:
             print(f"    失败 ❌ {e}", file=sys.stderr)
             if args.keep_temp:
-                pass  # 转码中间文件保留供排查
+                pass
             results.append((video, None, str(e)))
             traceback.print_exc(file=sys.stderr)
         finally:
