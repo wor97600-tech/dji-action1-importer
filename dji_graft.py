@@ -25,6 +25,10 @@ dji_graft.py — 把第三方视频"移植"进大疆 Action 系列相机原生 M
       并不能让相机识别出它并没有拍摄过这段视频，仅用于个人娱乐/兼容性目的。
     - 不同固件版本、不同相机型号的校验严格程度可能不同，如果播放依然失败，
       需要用 --ref 参数换一个更新固件下拍摄的参考文件重新尝试。
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+dji_graft.py — 流式移植 + 体积控制版
 """
 import argparse
 import json
@@ -35,7 +39,10 @@ import sys
 import threading
 from pathlib import Path
 
-from box_tools import read_box_list, find_box, build_box, parse_hdlr_type
+from box_tools import (
+    read_box_list, find_box, build_box, parse_hdlr_type,
+    read_box_list_from_file, read_box_payload, read_box_full,
+)
 
 
 def run(cmd):
@@ -53,37 +60,20 @@ def ffprobe_json(path):
 
 
 def check_tools():
-    import os
-    import shutil
-    import sys
-
-    # 如果是打包后的 EXE，获取 EXE 所在目录；否则用当前工作目录
-    if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = os.getcwd()
-
-    # 检查 ffmpeg 和 ffprobe
     for tool in ("ffmpeg", "ffprobe"):
-        # 1. 先看同目录下是否有对应的 .exe 文件
-        local_path = os.path.join(base_dir, tool + ".exe")
-        if os.path.isfile(local_path):
-            # 将该目录临时添加到 PATH 中（让 subprocess 能找到）
-            os.environ["PATH"] = base_dir + os.pathsep + os.environ.get("PATH", "")
-            continue  # 找到了，继续检查下一个
-        # 2. 如果同目录没有，再检查系统 PATH
         if shutil.which(tool) is None:
-            print(f"错误：未找到 {tool}，请安装 ffmpeg 并添加到 PATH，或将 {tool}.exe 放在本程序同目录。", file=sys.stderr)
+            print(f"错误：未找到 {tool}，请先安装 ffmpeg。", file=sys.stderr)
             sys.exit(1)
 
+
 # --------------------------------------------------------------------------
-# 第一步：读取参考文件的目标编码参数，转码第三方视频
+# 第一步：读取参数
 # --------------------------------------------------------------------------
 def get_ref_targets(ref_path):
     info = ffprobe_json(ref_path)
     v = next(s for s in info["streams"] if s["codec_type"] == "video")
     a = next(s for s in info["streams"] if s["codec_type"] == "audio")
-    fr = v["r_frame_rate"]  # e.g. "60000/1001"
+    fr = v["r_frame_rate"]
     return {
         "width": v["width"],
         "height": v["height"],
@@ -94,6 +84,16 @@ def get_ref_targets(ref_path):
         "video_bitrate": int(v.get("bit_rate") or info["format"].get("bit_rate", 35_000_000)),
         "audio_bitrate": int(a.get("bit_rate", 190_000)),
     }
+
+
+def get_input_video_bitrate(path):
+    """获取输入文件的视频码率（bps），失败返回 0"""
+    try:
+        info = ffprobe_json(path)
+        v = next(s for s in info["streams"] if s["codec_type"] == "video")
+        return int(v.get("bit_rate") or 0)
+    except Exception:
+        return 0
 
 
 def get_duration_seconds(path):
@@ -111,7 +111,6 @@ def format_bar(percent, width=30):
 
 
 def _parse_time_str(s):
-    # "HH:MM:SS.microseconds"
     try:
         h, m, sec = s.split(":")
         return int(h) * 3600 + int(m) * 60 + float(sec)
@@ -119,15 +118,10 @@ def _parse_time_str(s):
         return None
 
 
-def run_ffmpeg_with_progress(cmd, total_duration, label=""):
-    """执行 ffmpeg 命令，并在同一行打印可刷新的进度条。"""
+def run_ffmpeg_with_progress(cmd, total_duration, label="", progress_callback=None):
     cmd = cmd[:-1] + ["-progress", "pipe:1", "-nostats"] + [cmd[-1]]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, encoding="utf-8", errors="replace", bufsize=1)
-
-    # ffmpeg 平时的日志走 stderr，输出量很大，如果没人读会把管道缓冲区塞满，
-    # 导致 ffmpeg 卡住写不出去、我们又在等它退出——互相等待，程序假死。
-    # 用一个后台线程持续把 stderr 读走（只是丢弃/缓存，不占什么 CPU）。
     stderr_chunks = []
 
     def _drain_stderr():
@@ -137,49 +131,83 @@ def run_ffmpeg_with_progress(cmd, total_duration, label=""):
     t = threading.Thread(target=_drain_stderr, daemon=True)
     t.start()
 
-    last_line = ""
     for line in proc.stdout:
         line = line.strip()
         if line.startswith("out_time="):
             secs = _parse_time_str(line.split("=", 1)[1])
             if secs is not None:
-                if total_duration > 0:
-                    bar = format_bar(secs / total_duration * 100)
+                percent = (secs / total_duration * 100) if total_duration > 0 else 0
+                if progress_callback:
+                    progress_callback(min(100.0, percent))
                 else:
-                    bar = f"{secs:6.1f}s"
-                last_line = f"    {label} {bar}"
-                print(f"\r{last_line}", end="", flush=True)
+                    bar = format_bar(percent) if total_duration > 0 else f"{secs:6.1f}s"
+                    print(f"\r    {label} {bar}", end="", flush=True)
         elif line.startswith("progress=") and line.endswith("end"):
-            print(f"\r    {label} {format_bar(100)}", flush=True)
+            if progress_callback:
+                progress_callback(100.0)
+            else:
+                print(f"\r    {label} {format_bar(100)}", flush=True)
 
     proc.wait()
     t.join(timeout=5)
     if proc.returncode != 0:
-        print()  # 换行，避免报错信息和进度条粘在一起
+        if not progress_callback:
+            print()
         raise RuntimeError(f"ffmpeg 失败:\n{''.join(stderr_chunks)[-3000:]}")
 
 
-def transcode(input_path, out_path, targets, show_progress=True, label=""):
-    vb = targets["video_bitrate"]
+def transcode(input_path, out_path, targets, show_progress=True, label="",
+              progress_callback=None, crf=None, max_video_bitrate=None):
+    """
+    crf: 0-51，越小画质越好体积越大。推荐 23（默认）或 26（更小体积）。
+         None 表示使用固定码率（兼容旧行为）。
+    max_video_bitrate: 手动限制峰值码率（bps），覆盖参考文件码率。
+    """
     ab = max(targets["audio_bitrate"], 128_000)
+    
+    ref_vb = targets["video_bitrate"]
+    if max_video_bitrate:
+        vb = max_video_bitrate
+    else:
+        vb = ref_vb
+
+    x264_params = "ref=1:bframes=0:b-adapt=0:scenecut=0:cabac=1:aud=0"
+    video_cmd = [
+        "-c:v", "libx264", "-profile:v", "high", "-level", str(targets["level"] / 10),
+        "-tag:v", "avc1",
+        "-x264-params", x264_params,
+        "-bsf:v", "filter_units=remove_types=6",
+        "-pix_fmt", "yuv420p",
+    ]
+
+    if crf is not None:
+        video_cmd += [
+            "-crf", str(crf),
+            "-maxrate", str(vb),
+            "-bufsize", str(int(vb * 2)),
+        ]
+    else:
+        video_cmd += [
+            "-b:v", str(vb),
+            "-maxrate", str(int(vb * 1.15)),
+            "-bufsize", str(int(vb * 1.15)),
+        ]
+
     cmd = [
         "ffmpeg", "-y", "-i", str(input_path),
         "-vf", f"scale={targets['width']}:{targets['height']}:flags=lanczos,"
                f"fps={targets['fps']},format=yuv420p",
-        "-c:v", "libx264", "-profile:v", "high", "-level", str(targets["level"] / 10),
-        "-tag:v", "avc1",
-        # 保守码流结构：单参考帧、不用 B 帧、关闭多余 SEI —— 这是运动相机
-        # 硬件解码芯片能稳定解码的关键。
-        "-x264-params", "ref=1:bframes=0:b-adapt=0:scenecut=0:cabac=1:aud=0",
-        "-bsf:v", "filter_units=remove_types=6",
-        "-b:v", str(vb), "-maxrate", str(int(vb * 1.15)), "-bufsize", str(int(vb * 1.15)),
-        "-pix_fmt", "yuv420p",
+    ] + video_cmd + [
         "-c:a", "aac", "-ar", str(targets["sample_rate"]), "-ac", str(targets["channels"]),
         "-b:a", str(ab),
         "-movflags", "+faststart",
         str(out_path),
     ]
-    if show_progress:
+
+    if progress_callback is not None:
+        total_duration = get_duration_seconds(input_path)
+        run_ffmpeg_with_progress(cmd, total_duration, label=label, progress_callback=progress_callback)
+    elif show_progress:
         total_duration = get_duration_seconds(input_path)
         run_ffmpeg_with_progress(cmd, total_duration, label=label)
     else:
@@ -189,7 +217,7 @@ def transcode(input_path, out_path, targets, show_progress=True, label=""):
 
 
 # --------------------------------------------------------------------------
-# 第二步：box 级别解析辅助函数
+# 第二步：box 辅助函数
 # --------------------------------------------------------------------------
 def parse_trak(trak):
     tc = read_box_list(trak['payload'])
@@ -294,140 +322,186 @@ def patch_elst_full_span(edts_box, new_dur):
     elst = find_box(ec_, b'elst')
     p = elst['payload']
     if p[0] != 0:
-        return edts_box['full']  # version1 edts 不处理，原样保留
+        return edts_box['full']
     p2 = p[:8] + struct.pack('>I', new_dur) + p[12:]
     return build_box(b'edts', build_box(b'elst', p2))
 
 
 # --------------------------------------------------------------------------
-# 第三步：主移植逻辑
+# 流式复制辅助
 # --------------------------------------------------------------------------
-def graft(ref_path, reencoded_path, output_path):
-    ref_data = open(ref_path, 'rb').read()
-    ref_top = read_box_list(ref_data)
+def _stream_copy(src_f, dst_f, size, chunk=1024 * 1024):
+    remaining = size
+    while remaining > 0:
+        to_read = min(chunk, remaining)
+        data = src_f.read(to_read)
+        if not data:
+            raise RuntimeError(f"流式复制时源文件提前结束，预期复制 {size} 字节")
+        dst_f.write(data)
+        remaining -= len(data)
 
-    ftyp_full = find_box(ref_top, b'ftyp')['full']
-    wide_box = find_box(ref_top, b'wide')
-    wide_full = wide_box['full'] if wide_box else b''
-    prefix = ftyp_full + wide_full
-    mdat_ref = find_box(ref_top, b'mdat')
-    mdat_header_len = mdat_ref['payload_start'] - mdat_ref['start']
-    meta_sample_start = len(prefix) + mdat_header_len
-    if meta_sample_start != mdat_ref['payload_start']:
-        raise RuntimeError("参考文件的 ftyp/wide/mdat 布局和预期不符，无法安全保留 DJI.Meta 偏移")
 
-    moov = find_box(ref_top, b'moov')
-    moov_children = read_box_list(moov['payload'])
-    mvhd = find_box(moov_children, b'mvhd')
-    udta_full = find_box(moov_children, b'udta')
-    udta_full = udta_full['full'] if udta_full else b''
-    traks = [b for b in moov_children if b['type'] == b'trak']
+# --------------------------------------------------------------------------
+# 第三步：主移植逻辑（流式版 + 修复 meta_size 计算）
+# --------------------------------------------------------------------------
+def graft(ref_path, reencoded_path, output_path, chunk_size=1024 * 1024):
+    with open(ref_path, 'rb') as ref_f, open(reencoded_path, 'rb') as re_f:
+        ref_top = read_box_list_from_file(ref_f)
 
-    trak_info = {}
-    for t in traks:
-        info = parse_trak(t)
-        trak_info[info['htype']] = info
+        ftyp_info = find_box(ref_top, b'ftyp')
+        wide_info = find_box(ref_top, b'wide')
+        mdat_info = find_box(ref_top, b'mdat')
+        moov_info = find_box(ref_top, b'moov')
 
-    if b'vide' not in trak_info or b'soun' not in trak_info:
-        raise RuntimeError("参考文件里没找到 video/audio 轨道，结构和预期不符")
+        if not ftyp_info or not mdat_info or not moov_info:
+            raise RuntimeError("参考文件缺少必需的 ftyp/mdat/moov box")
 
-    video_o, audio_o = trak_info[b'vide'], trak_info[b'soun']
-    meta_o = trak_info.get(b'meta')  # DJI.Meta 轨道，可能不存在
+        prefix = read_box_full(ref_f, ftyp_info)
+        if wide_info:
+            prefix += read_box_full(ref_f, wide_info)
 
-    meta_sample_bytes = b''
-    meta_size = 0
-    if meta_o is not None:
-        meta_stbl_children = read_box_list(meta_o['stbl']['payload'])
-        sp = find_box(meta_stbl_children, b'stsz')['payload']
-        sample_size, _count = struct.unpack('>II', sp[4:12])
-        meta_size = sample_size if sample_size != 0 else struct.unpack('>I', sp[12:16])[0]
-        meta_sample_bytes = ref_data[meta_sample_start:meta_sample_start + meta_size]
+        mdat_header_len = mdat_info['payload_start'] - mdat_info['start']
+        meta_sample_start = len(prefix) + mdat_header_len
 
-    # ---- 读取转码后文件 ----
-    re_data = open(reencoded_path, 'rb').read()
-    re_top = read_box_list(re_data)
-    re_moov = find_box(re_top, b'moov')
-    re_moov_children = read_box_list(re_moov['payload'])
-    re_traks = [b for b in re_moov_children if b['type'] == b'trak']
-    re_trak_info = {}
-    for t in re_traks:
-        info = parse_trak(t)
-        re_trak_info[info['htype']] = info
-    video_r, audio_r = re_trak_info[b'vide'], re_trak_info[b'soun']
-    vr_stbl, ar_stbl = get_stbl_children(video_r), get_stbl_children(audio_r)
+        moov_payload = read_box_payload(ref_f, moov_info)
+        moov_children = read_box_list(moov_payload)
+        mvhd = find_box(moov_children, b'mvhd')
+        udta_full = find_box(moov_children, b'udta')
+        udta_full = udta_full['full'] if udta_full else b''
+        traks = [b for b in moov_children if b['type'] == b'trak']
 
-    video_chunks = compute_chunk_byte_ranges(vr_stbl)
-    audio_chunks = compute_chunk_byte_ranges(ar_stbl)
+        trak_info = {}
+        for t in traks:
+            info = parse_trak(t)
+            trak_info[info['htype']] = info
 
-    tagged = [(off, size, 'v', i) for i, (off, size) in enumerate(video_chunks)]
-    tagged += [(off, size, 'a', i) for i, (off, size) in enumerate(audio_chunks)]
-    tagged.sort(key=lambda x: x[0])
+        if b'vide' not in trak_info or b'soun' not in trak_info:
+            raise RuntimeError("参考文件里没找到 video/audio 轨道，结构和预期不符")
 
-    new_video_offsets = [None] * len(video_chunks)
-    new_audio_offsets = [None] * len(audio_chunks)
-    cursor = meta_sample_start + meta_size
-    mdat_pieces = [meta_sample_bytes]
-    for off, size, tag, idx in tagged:
-        mdat_pieces.append(re_data[off:off + size])
-        (new_video_offsets if tag == 'v' else new_audio_offsets)[idx] = cursor
-        cursor += size
-    new_mdat_payload = b''.join(mdat_pieces)
-    assert None not in new_video_offsets and None not in new_audio_offsets
+        video_o, audio_o = trak_info[b'vide'], trak_info[b'soun']
+        meta_o = trak_info.get(b'meta')
 
-    new_video_stco = build_stco(new_video_offsets)
-    new_audio_stco = build_stco(new_audio_offsets)
+        # ---- 修复：正确计算 meta 轨道的总 sample 大小 ----
+        meta_sample_bytes = b''
+        meta_size = 0
+        if meta_o is not None:
+            meta_stbl_children = read_box_list(meta_o['stbl']['payload'])
+            sp = find_box(meta_stbl_children, b'stsz')['payload']
+            sample_size, count = struct.unpack('>II', sp[4:12])
+            if sample_size != 0:
+                meta_size = sample_size * count
+            else:
+                if count > 0:
+                    sizes = struct.unpack('>%dI' % count, sp[12:12 + 4 * count])
+                    meta_size = sum(sizes)
+            if meta_size > 0:
+                ref_f.seek(meta_sample_start)
+                meta_sample_bytes = ref_f.read(meta_size)
 
-    # ---- 时长计算 ----
-    v_ts, v_dur = read_mdhd_ts_dur(video_r['mdhd'])
-    a_ts, a_dur = read_mdhd_ts_dur(audio_r['mdhd'])
-    movie_ts = struct.unpack('>I', mvhd['payload'][12:16])[0]
-    video_dur_movie = round(v_dur * movie_ts / v_ts)
-    audio_dur_movie = round(a_dur * movie_ts / a_ts)
-    overall_dur = max(video_dur_movie, audio_dur_movie)
+        re_top = read_box_list_from_file(re_f)
+        re_moov_info = find_box(re_top, b'moov')
+        if not re_moov_info:
+            raise RuntimeError("转码后文件缺少 moov box")
 
-    mvhd_full_new = build_box(b'mvhd', patch_u32(mvhd['payload'], 16, overall_dur))
-    video_tkhd_new = patch_tkhd_duration(video_o['tkhd'], video_dur_movie)
-    audio_tkhd_new = patch_tkhd_duration(audio_o['tkhd'], audio_dur_movie)
-    video_mdhd_new = patch_mdhd_duration(video_o['mdhd'], v_dur)
-    audio_mdhd_new = patch_mdhd_duration(audio_o['mdhd'], a_dur)
-    video_edts_new = patch_elst_full_span(video_o['edts'], overall_dur) if video_o['edts'] else b''
+        re_moov_payload = read_box_payload(re_f, re_moov_info)
+        re_moov_children = read_box_list(re_moov_payload)
+        re_traks = [b for b in re_moov_children if b['type'] == b'trak']
+        re_trak_info = {}
+        for t in re_traks:
+            info = parse_trak(t)
+            re_trak_info[info['htype']] = info
 
-    def bx(d, key):
-        return d[key]['full'] if key in d else b''
+        if b'vide' not in re_trak_info or b'soun' not in re_trak_info:
+            raise RuntimeError("转码后文件缺少 video/audio 轨道")
 
-    video_stbl_payload = (
-        bx(vr_stbl, b'stsd') + bx(vr_stbl, b'stts') + bx(vr_stbl, b'ctts') +
-        bx(vr_stbl, b'stsc') + bx(vr_stbl, b'stsz') + new_video_stco + bx(vr_stbl, b'stss')
-    )
-    audio_stbl_payload = (
-        bx(ar_stbl, b'stsd') + bx(ar_stbl, b'stts') +
-        bx(ar_stbl, b'stsc') + bx(ar_stbl, b'stsz') + new_audio_stco
-    )
-    video_stbl_full = build_box(b'stbl', video_stbl_payload)
-    audio_stbl_full = build_box(b'stbl', audio_stbl_payload)
+        video_r, audio_r = re_trak_info[b'vide'], re_trak_info[b'soun']
+        vr_stbl, ar_stbl = get_stbl_children(video_r), get_stbl_children(audio_r)
 
-    video_minfc = {c['type']: c for c in video_o['minfc']}
-    audio_minfc = {c['type']: c for c in audio_o['minfc']}
-    video_minf_full = build_box(
-        b'minf', video_minfc[b'vmhd']['full'] + video_minfc[b'dinf']['full'] + video_stbl_full)
-    audio_minf_full = build_box(
-        b'minf', audio_minfc[b'smhd']['full'] + audio_minfc[b'dinf']['full'] + audio_stbl_full)
+        video_chunks = compute_chunk_byte_ranges(vr_stbl)
+        audio_chunks = compute_chunk_byte_ranges(ar_stbl)
 
-    video_mdia_full = build_box(
-        b'mdia', video_mdhd_new + video_o['hdlr']['full'] + video_minf_full)
-    audio_mdia_full = build_box(
-        b'mdia', audio_mdhd_new + audio_o['hdlr']['full'] + audio_minf_full)
+        tagged = [(off, size, 'v', i) for i, (off, size) in enumerate(video_chunks)]
+        tagged += [(off, size, 'a', i) for i, (off, size) in enumerate(audio_chunks)]
+        tagged.sort(key=lambda x: x[0])
 
-    video_trak_full = build_box(b'trak', video_tkhd_new + video_edts_new + video_mdia_full)
-    audio_trak_full = build_box(b'trak', audio_tkhd_new + audio_mdia_full)
-    meta_trak_full = meta_o['trak']['full'] if meta_o else b''
+        v_ts, v_dur = read_mdhd_ts_dur(video_r['mdhd'])
+        a_ts, a_dur = read_mdhd_ts_dur(audio_r['mdhd'])
+        movie_ts = struct.unpack('>I', mvhd['payload'][12:16])[0]
+        video_dur_movie = round(v_dur * movie_ts / v_ts)
+        audio_dur_movie = round(a_dur * movie_ts / a_ts)
+        overall_dur = max(video_dur_movie, audio_dur_movie)
 
-    moov_full = build_box(
-        b'moov', mvhd_full_new + udta_full + video_trak_full + audio_trak_full + meta_trak_full)
-    mdat_full = build_box(b'mdat', new_mdat_payload)
+        new_video_offsets = [None] * len(video_chunks)
+        new_audio_offsets = [None] * len(audio_chunks)
 
-    final_bytes = prefix + mdat_full + moov_full
-    Path(output_path).write_bytes(final_bytes)
+        new_mdat_payload_size = meta_size + sum(size for _, size, _, _ in tagged)
+        mdat_total_size = 8 + new_mdat_payload_size
+
+        if mdat_total_size >= 2 ** 32:
+            mdat_header = struct.pack('>I4sQ', 1, b'mdat', mdat_total_size + 8)
+            new_mdat_header_len = 16
+        else:
+            mdat_header = struct.pack('>I4s', mdat_total_size, b'mdat')
+            new_mdat_header_len = 8
+
+        cursor = len(prefix) + new_mdat_header_len + meta_size
+        for off, size, tag, idx in tagged:
+            (new_video_offsets if tag == 'v' else new_audio_offsets)[idx] = cursor
+            cursor += size
+
+        assert None not in new_video_offsets and None not in new_audio_offsets
+
+        new_video_stco = build_stco(new_video_offsets)
+        new_audio_stco = build_stco(new_audio_offsets)
+
+        def bx(d, key):
+            return d[key]['full'] if key in d else b''
+
+        video_stbl_payload = (
+            bx(vr_stbl, b'stsd') + bx(vr_stbl, b'stts') + bx(vr_stbl, b'ctts') +
+            bx(vr_stbl, b'stsc') + bx(vr_stbl, b'stsz') + new_video_stco + bx(vr_stbl, b'stss')
+        )
+        audio_stbl_payload = (
+            bx(ar_stbl, b'stsd') + bx(ar_stbl, b'stts') +
+            bx(ar_stbl, b'stsc') + bx(ar_stbl, b'stsz') + new_audio_stco
+        )
+        video_stbl_full = build_box(b'stbl', video_stbl_payload)
+        audio_stbl_full = build_box(b'stbl', audio_stbl_payload)
+
+        video_minfc = {c['type']: c for c in video_o['minfc']}
+        audio_minfc = {c['type']: c for c in audio_o['minfc']}
+        video_minf_full = build_box(
+            b'minf', video_minfc[b'vmhd']['full'] + video_minfc[b'dinf']['full'] + video_stbl_full)
+        audio_minf_full = build_box(
+            b'minf', audio_minfc[b'smhd']['full'] + audio_minfc[b'dinf']['full'] + audio_stbl_full)
+
+        video_mdia_full = build_box(
+            b'mdia', patch_mdhd_duration(video_o['mdhd'], v_dur) + video_o['hdlr']['full'] + video_minf_full)
+        audio_mdia_full = build_box(
+            b'mdia', patch_mdhd_duration(audio_o['mdhd'], a_dur) + audio_o['hdlr']['full'] + audio_minf_full)
+
+        video_trak_full = build_box(b'trak',
+            patch_tkhd_duration(video_o['tkhd'], video_dur_movie) +
+            (patch_elst_full_span(video_o['edts'], overall_dur) if video_o['edts'] else b'') +
+            video_mdia_full)
+        audio_trak_full = build_box(b'trak',
+            patch_tkhd_duration(audio_o['tkhd'], audio_dur_movie) + audio_mdia_full)
+        meta_trak_full = meta_o['trak']['full'] if meta_o else b''
+
+        mvhd_full_new = build_box(b'mvhd', patch_u32(mvhd['payload'], 16, overall_dur))
+        moov_full = build_box(
+            b'moov', mvhd_full_new + udta_full + video_trak_full + audio_trak_full + meta_trak_full)
+
+        with open(output_path, 'wb') as out_f:
+            out_f.write(prefix)
+            out_f.write(mdat_header)
+            if meta_sample_bytes:
+                out_f.write(meta_sample_bytes)
+            for off, size, tag, idx in tagged:
+                re_f.seek(off)
+                _stream_copy(re_f, out_f, size, chunk_size)
+            out_f.write(moov_full)
+
     return output_path
 
 
@@ -438,6 +512,10 @@ def main():
     ap.add_argument("--input", required=True, help="要导入的第三方视频文件")
     ap.add_argument("--output", required=True, help="输出文件路径（建议按 DJI_XXXX.MP4 命名）")
     ap.add_argument("--keep-temp", action="store_true", help="保留中间转码文件，便于排查问题")
+    ap.add_argument("--crf", type=int, default=None,
+                    help="使用 CRF 质量模式（推荐 23~28），体积通常比固定码率小 30%%-60%%")
+    ap.add_argument("--max-bitrate", type=int, default=None,
+                    help="手动限制视频峰值码率（bps），例如 20000000 表示 20Mbps")
     args = ap.parse_args()
 
     check_tools()
@@ -449,11 +527,18 @@ def main():
 
     print(f"[1/3] 读取参考文件编码参数: {ref_path}")
     targets = get_ref_targets(ref_path)
+    
+    input_vb = get_input_video_bitrate(input_path)
+    if input_vb > 0 and targets["video_bitrate"] > input_vb * 3 and args.crf is None:
+        print(f"      提示：参考文件码率 {targets['video_bitrate']//1000}kbps 远高于输入文件 "
+              f"{input_vb//1000}kbps，建议加 --crf 23 以减小体积")
+
     print(f"      目标规格: {targets['width']}x{targets['height']} @ {targets['fps']}fps, "
           f"音频 {targets['sample_rate']}Hz/{targets['channels']}ch")
 
-    print(f"[2/3] 转码第三方视频（保守码流结构，兼容硬件解码器）: {input_path}")
-    transcode(input_path, tmp_path, targets, show_progress=True, label=input_path.name)
+    print(f"[2/3] 转码第三方视频: {input_path}")
+    transcode(input_path, tmp_path, targets, show_progress=True, label=input_path.name,
+              crf=args.crf, max_video_bitrate=args.max_bitrate)
 
     print(f"[3/3] 移植容器结构，生成最终文件: {output_path}")
     graft(ref_path, tmp_path, output_path)
@@ -461,7 +546,10 @@ def main():
     if not args.keep_temp:
         tmp_path.unlink(missing_ok=True)
 
-    print(f"完成 ✅  输出文件: {output_path}")
+    out_size = output_path.stat().st_size
+    in_size = input_path.stat().st_size
+    ratio = out_size / in_size if in_size > 0 else 0
+    print(f"完成 ✅  输出文件: {output_path} ({out_size/1024/1024:.1f} MB, 体积比 {ratio:.2f}x)")
     print("下一步：复制到相机 microSD 卡的 DCIM/DJI_XXX 目录下，文件名改成符合相机命名规则的样式，"
           "装卡上机测试播放。")
 
