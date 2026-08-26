@@ -45,6 +45,6 @@ DJI Action 1 反向导入工具
 
 致谢
 
-本项目由 Claude AI 辅助开发，实际测试可用。
+本项目由 Claudehb和kimi辅助开发，实际测试可用。
 
 有问题请提 Issue，欢迎 PR！
