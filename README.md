@@ -18,9 +18,9 @@ DJI Action 1 反向导入工具
 
 ## 快速开始（给普通用户）
 
-1. 下载本仓库的 `dji_graft_gui.exe`
+1. 下载本仓库的 `DJI-Action1-Importer.exe`
 2. 去 [ffmpeg 下载页](https://www.gyan.dev/ffmpeg/builds/) 下载 `ffmpeg-release-full.7z`，解压后把 `ffmpeg.exe` 和 `ffprobe.exe` 放到 **和 exe 同一个文件夹**里
-3. 双击 `dji_graft_gui.exe` 运行
+3. 双击 `DJI-Action1-Importer.exe` 运行
 
 ## 首次使用步骤
 
