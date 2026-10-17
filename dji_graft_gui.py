@@ -26,7 +26,7 @@ from ffmpeg_env import ensure_ffmpeg, find_ffmpeg, ffmpeg_version
 from utils import find_input_videos
 
 
-APP_VERSION = "v3.1"
+APP_VERSION = "v4.0.0"
 
 
 def _enable_dpi_awareness():
