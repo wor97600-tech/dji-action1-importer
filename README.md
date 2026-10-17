@@ -1,6 +1,6 @@
 # DJI Action 第三方视频移植工具
 
-桌面版：**v3.1** · Android 版：**v4.0.0**
+桌面版：**v3.1 功能** · Android 版：**v4.0.0**
 
 把第三方拍摄的视频（手机、运动相机、屏幕录像等）转码并“移植”进大疆
 Action 系列相机的原生 MP4 容器结构，让相机能像播放自己拍摄的文件一样正常回放。
@@ -18,7 +18,7 @@ Action 系列相机的原生 MP4 容器结构，让相机能像播放自己拍�
 ### 下载安装
 
 1. 打开仓库的 [Releases](../../releases) 页面；
-2. 下载最新的 `DJIGraft-Android-*.apk`；
+2. 下载最新的 `DJIGraft-Android-*.apk`（同一个 Release 里也包含 Windows 版 `DJIGraft.exe`）；
 3. 在手机上允许“安装未知来源应用”，安装后即可使用。
 
 APK 已内置 FFmpeg（含 libx264），不需要 Root，也不需要额外安装 Termux。
@@ -82,7 +82,8 @@ git push origin v4.0.0
 
 ### 直接使用打包好的 exe（推荐）
 
-从 [Releases](../../releases) 下载 `DJIGraft.exe`，双击运行即可，不需要单独安装
+从 [Releases](../../releases) 下载 `DJIGraft.exe`（v4.0.0 起与 Android APK 放在同一个
+Release 里），双击运行即可，不需要单独安装
 Python 或 ffmpeg。首次转换时如果检测不到 ffmpeg，程序会提示并自动下载安装
 （需要联网，之后会缓存在 `%LOCALAPPDATA%\DJIGraft\bin`）。
 
