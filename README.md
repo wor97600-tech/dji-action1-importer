@@ -64,12 +64,14 @@ gradle :app:assembleDebug
 
 APK 输出在 `android/app/build/outputs/apk/debug/app-debug.apk`。
 
-也可以直接把代码推到 GitHub，`android` workflow 会自动：
+也可以直接把代码推到 GitHub。推送 `v*` 标签会触发 `release` workflow：
 
-1. 下载并校验 FFmpegKitNext；
-2. 运行容器移植单元测试（与桌面版 `dji_graft.py` 输出逐字节对比）；
-3. 构建 APK 并上传 artifact；
-4. 推送 `v*` 标签时，自动把 APK 附加到 GitHub Release。
+1. 在 Windows runner 上构建 `DJIGraft.exe`；
+2. 下载并校验 FFmpegKitNext；
+3. 运行容器移植单元测试（与桌面版 `dji_graft.py` 输出逐字节对比）；
+4. 构建 APK；
+5. 等两端都成功后，把 `DJIGraft.exe` 和 `DJIGraft-Android-*.apk` 一起附加到
+   同一个 GitHub Release。
 
 例如：
 
