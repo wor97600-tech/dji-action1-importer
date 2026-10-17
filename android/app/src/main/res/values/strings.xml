@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DJI 视频移植</string>
+    <string name="app_subtitle">Android 版 · 第三方视频导入 Action 相机</string>
+
+    <string name="intro">把手机、运动相机或屏幕录像转成 DJI Action 原生 MP4 容器结构。转换前请先用一小段视频在相机上验证。</string>
+
+    <string name="section_reference">① 参考原生文件</string>
+    <string name="reference_empty">请选择一个相机自己拍摄、能正常回放的 MP4 文件。</string>
+    <string name="pick_reference">选择参考 MP4</string>
+
+    <string name="section_inputs">② 要导入的视频</string>
+    <string name="inputs_empty">还没有添加视频，可一次选择多个文件。</string>
+    <string name="pick_inputs">添加视频（可多选）</string>
+    <string name="clear_inputs">清空</string>
+    <string name="remove">移除</string>
+
+    <string name="section_output">③ 输出设置</string>
+    <string name="hint_prefix">文件名前缀</string>
+    <string name="hint_start">起始编号</string>
+    <string name="crf_label">画质 CRF：%1$d</string>
+    <string name="crf_help">数值越小越清晰、体积越大。推荐 23，体积敏感可用 26–28。</string>
+    <string name="hint_max_bitrate">峰值码率 Mbps（可选）</string>
+    <string name="max_bitrate_help">留空则使用参考文件的码率作为上限。</string>
+    <string name="pick_output">选择输出文件夹（可选）</string>
+    <string name="reset_output">恢复默认下载目录</string>
+    <string name="output_default">默认保存到 Downloads/DJIGraft</string>
+    <string name="output_selected">已选择输出文件夹：%1$s</string>
+    <string name="output_hint">如果手机插了相机 SD 卡，可以直接选择卡里的 DCIM/DJI_XXX 文件夹。</string>
+
+    <string name="section_start">④ 开始转换</string>
+    <string name="start">开始转换</string>
+    <string name="cancel">取消</string>
+    <string name="cancel_confirm_title">停止转换？</string>
+    <string name="cancel_confirm_message">当前正在处理的文件会被删除，已经完成的文件会保留。</string>
+    <string name="cancel_confirm_yes">停止</string>
+    <string name="cancel_confirm_no">继续转换</string>
+
+    <string name="result_title">转换结果</string>
+    <string name="open">打开</string>
+    <string name="share">分享</string>
+    <string name="done_toast">转换完成</string>
+    <string name="cancelled_toast">已停止转换</string>
+    <string name="error_title">转换失败</string>
+    <string name="space_warning_title">存储空间可能不足</string>
+    <string name="space_warning_message">预计需要约 %1$s 临时空间，当前可用约 %2$s。空间不足时转换可能中断，是否仍然继续？</string>
+    <string name="continue_anyway">仍然继续</string>
+
+    <string name="footnote">提示：不同相机固件对容器的要求可能不同。批量导入前，建议先用一条 10 秒左右的短片在相机上测试回放。</string>
+    <string name="notification_channel">视频转换</string>
+    <string name="notification_title">DJI 视频移植</string>
+    <string name="notification_preparing">正在准备…</string>
+    <string name="notification_finished">转换完成</string>
+    <string name="notification_cancelled">转换已停止</string>
+    <string name="notification_failed">转换失败</string>
+</resources>

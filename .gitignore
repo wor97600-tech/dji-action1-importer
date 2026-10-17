@@ -15,6 +15,17 @@ dist/
 _smoke/
 selftest_result.txt
 vendor/
+.toolchain/
+
+# Android
+android/.gradle/
+android/.idea/
+android/build/
+android/app/build/
+android/libs/
+android/local.properties
+*.apk
+*.aab
 
 # 系统文件
 Thumbs.db
