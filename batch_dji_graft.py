@@ -9,8 +9,7 @@ import traceback
 from pathlib import Path
 
 from dji_graft import check_tools, get_ref_targets, transcode, graft
-
-VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".ts", ".wmv", ".flv"}
+from utils import find_input_videos, VIDEO_EXTS
 
 
 def format_batch_bar(done, total, width=30):
@@ -19,20 +18,13 @@ def format_batch_bar(done, total, width=30):
     return "[" + "#" * filled + "-" * (width - filled) + f"] {done}/{total}"
 
 
-def find_input_videos(input_dir):
-    files = sorted(
-        p for p in Path(input_dir).iterdir()
-        if p.is_file() and p.suffix.lower() in VIDEO_EXTS
-    )
-    return files
-
-
 def main():
     ap = argparse.ArgumentParser(description="批量把第三方视频移植进大疆 Action 原生 MP4 容器结构")
     ap.add_argument("--ref", required=True, help="参考原生 MP4 文件")
     ap.add_argument("--input-dir", required=True, help="待转换视频所在文件夹")
     ap.add_argument("--output-dir", required=True, help="输出文件夹")
     ap.add_argument("--start", type=int, default=900, help="输出文件起始编号（默认 900）")
+    ap.add_argument("--digits", type=int, default=4, help="输出文件编号位数（默认 4，如 DJI_0002.MP4）")
     ap.add_argument("--prefix", default="DJI_", help="输出文件名前缀（默认 DJI_）")
     ap.add_argument("--keep-temp", action="store_true", help="保留每个文件的中间转码结果")
     ap.add_argument("--crf", type=int, default=None,
@@ -41,7 +33,7 @@ def main():
                     help="手动限制视频峰值码率（kbps），例如 20000 表示 20Mbps")
     args = ap.parse_args()
 
-    check_tools()
+    check_tools(progress_callback=lambda pct, msg: print(f"  {msg}", flush=True))
 
     ref_path = Path(args.ref)
     input_dir = Path(args.input_dir)
@@ -73,9 +65,12 @@ def main():
 
     results = []
     number = args.start
+    if not (1 <= args.digits <= 10):
+        print("错误：--digits 必须在 1~10 之间", file=sys.stderr)
+        sys.exit(1)
 
     for idx, video in enumerate(videos, 1):
-        out_name = f"{args.prefix}{number:04d}.MP4"
+        out_name = f"{args.prefix}{number:0{args.digits}d}.MP4"
         out_path = output_dir / out_name
         tmp_path = out_path.with_suffix(".reencoded_tmp.mp4")
 

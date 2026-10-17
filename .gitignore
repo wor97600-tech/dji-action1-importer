@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# 本地调试 / 临时文件
+*.reencoded_tmp.mp4
+_smoke/
+selftest_result.txt
+vendor/
+
+# 系统文件
+Thumbs.db
+.DS_Store

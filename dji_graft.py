@@ -1,48 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-dji_graft.py — 把第三方视频"移植"进大疆 Action 系列相机原生 MP4 的容器结构里，
-使相机固件能够识别、回放它。
-
-原理：
-    1. 用 ffmpeg 把第三方视频转码成和"参考原生文件"一致的编码参数
-       （分辨率/帧率/H.264 High Profile/单参考帧/无 B 帧/无多余 SEI，
-       这些是运动相机硬件解码芯片能稳定解码的关键限制）。
-    2. 解析参考原生文件的 MP4 box 树（ftyp / mdat / moov，以及 moov 下的
-       video / audio / DJI.Meta 三条 trak）。
-    3. 只替换 video、audio 两条 trak 的 sample table（stsd/stts/stsz/stco 等）
-       和媒体数据本身；DJI.Meta 轨道和 udta（含机型、序列号等信息）原封不动。
-    4. 重新计算所有 chunk 在新文件中的物理偏移，重建 mdat，patch 时长字段。
-    5. 输出的文件在容器结构和元数据层面与参考文件高度一致，编码芯片可以正常解码。
-
-用法：
-    python3 dji_graft.py --ref DJI_0819.MP4 --input my_video.mp4 --output DJI_0900.MP4
-
-依赖：系统需要已安装 ffmpeg / ffprobe（本工具通过 subprocess 调用，不再依赖网络下载任何库）。
-
-注意事项：
-    - 仅在你自己拥有的相机 / 视频素材上使用；产出文件只是"容器伪装"，
-      并不能让相机识别出它并没有拍摄过这段视频，仅用于个人娱乐/兼容性目的。
-    - 不同固件版本、不同相机型号的校验严格程度可能不同，如果播放依然失败，
-      需要用 --ref 参数换一个更新固件下拍摄的参考文件重新尝试。
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
 dji_graft.py — 流式移植 + 体积控制版
 """
 import argparse
 import json
-import shutil
 import struct
 import subprocess
-import sys
 import threading
 from pathlib import Path
 
+from ffmpeg_env import ensure_ffmpeg
 from box_tools import (
     read_box_list, find_box, build_box, parse_hdlr_type,
     read_box_list_from_file, read_box_payload, read_box_full,
 )
+
+
+FFMPEG_BIN = "ffmpeg"
+FFPROBE_BIN = "ffprobe"
+
+
+def configure_ffmpeg(ffmpeg_path, ffprobe_path):
+    """设置后续转码/探测实际使用的 ffmpeg / ffprobe 可执行文件路径。"""
+    global FFMPEG_BIN, FFPROBE_BIN
+    FFMPEG_BIN = str(ffmpeg_path)
+    FFPROBE_BIN = str(ffprobe_path)
 
 
 def run(cmd):
@@ -51,7 +34,7 @@ def run(cmd):
 
 
 def ffprobe_json(path):
-    cmd = ["ffprobe", "-v", "error", "-show_format", "-show_streams",
+    cmd = [FFPROBE_BIN, "-v", "error", "-show_format", "-show_streams",
            "-of", "json", str(path)]
     r = run(cmd)
     if r.returncode != 0:
@@ -59,11 +42,10 @@ def ffprobe_json(path):
     return json.loads(r.stdout)
 
 
-def check_tools():
-    for tool in ("ffmpeg", "ffprobe"):
-        if shutil.which(tool) is None:
-            print(f"错误：未找到 {tool}，请先安装 ffmpeg。", file=sys.stderr)
-            sys.exit(1)
+def check_tools(progress_callback=None):
+    """确保 ffmpeg / ffprobe 可用，并配置为后续使用的可执行文件。"""
+    ffmpeg_path, ffprobe_path = ensure_ffmpeg(progress_callback)
+    configure_ffmpeg(ffmpeg_path, ffprobe_path)
 
 
 # --------------------------------------------------------------------------
@@ -73,12 +55,12 @@ def get_ref_targets(ref_path):
     info = ffprobe_json(ref_path)
     v = next(s for s in info["streams"] if s["codec_type"] == "video")
     a = next(s for s in info["streams"] if s["codec_type"] == "audio")
-    fr = v["r_frame_rate"]
+    fr = v.get("r_frame_rate") or v.get("avg_frame_rate") or "30000/1001"
     return {
         "width": v["width"],
         "height": v["height"],
         "fps": fr,
-        "level": v.get("level", 50),
+        "level": int(v.get("level") or 50),
         "sample_rate": int(a["sample_rate"]),
         "channels": int(a["channels"]),
         "video_bitrate": int(v.get("bit_rate") or info["format"].get("bit_rate", 35_000_000)),
@@ -194,7 +176,7 @@ def transcode(input_path, out_path, targets, show_progress=True, label="",
         ]
 
     cmd = [
-        "ffmpeg", "-y", "-i", str(input_path),
+        FFMPEG_BIN, "-y", "-i", str(input_path),
         "-vf", f"scale={targets['width']}:{targets['height']}:flags=lanczos,"
                f"fps={targets['fps']},format=yuv420p",
     ] + video_cmd + [
@@ -245,6 +227,18 @@ def parse_stco(box):
     return list(struct.unpack('>%dI' % ec, p[8:8 + 4 * ec]))
 
 
+def parse_co64(box):
+    p = box['payload']
+    ec = struct.unpack('>I', p[4:8])[0]
+    return list(struct.unpack('>%dQ' % ec, p[8:8 + 8 * ec]))
+
+
+def parse_chunk_offsets(box):
+    if box['type'] == b'co64':
+        return parse_co64(box)
+    return parse_stco(box)
+
+
 def parse_stsc(box):
     p = box['payload']
     ec = struct.unpack('>I', p[4:8])[0]
@@ -275,12 +269,15 @@ def samples_per_chunk_list(stsc_entries, num_chunks):
 
 
 def compute_chunk_byte_ranges(stbl_children):
-    stco = parse_stco(stbl_children[b'stco'])
+    offset_box = stbl_children.get(b'co64') or stbl_children.get(b'stco')
+    if offset_box is None:
+        raise RuntimeError("轨道里没有找到 stco/co64 分块偏移表")
+    chunk_offsets = parse_chunk_offsets(offset_box)
     stsc = parse_stsc(stbl_children[b'stsc'])
     stsz = parse_stsz(stbl_children[b'stsz'])
-    spc_list = samples_per_chunk_list(stsc, len(stco))
+    spc_list = samples_per_chunk_list(stsc, len(chunk_offsets))
     ranges, sample_idx = [], 0
-    for i, chunk_offset in enumerate(stco):
+    for i, chunk_offset in enumerate(chunk_offsets):
         n = spc_list[i]
         ranges.append((chunk_offset, sum(stsz[sample_idx:sample_idx + n])))
         sample_idx += n
@@ -292,6 +289,18 @@ def build_stco(offsets):
     payload = struct.pack('>I', 0) + struct.pack('>I', len(offsets))
     payload += struct.pack('>%dI' % len(offsets), *offsets)
     return build_box(b'stco', payload)
+
+
+def build_co64(offsets):
+    payload = struct.pack('>I', 0) + struct.pack('>I', len(offsets))
+    payload += struct.pack('>%dQ' % len(offsets), *offsets)
+    return build_box(b'co64', payload)
+
+
+def build_chunk_offsets(box_type, offsets):
+    if box_type == b'co64':
+        return build_co64(offsets)
+    return build_stco(offsets)
 
 
 def read_mdhd_ts_dur(mdhd_box):
@@ -451,8 +460,10 @@ def graft(ref_path, reencoded_path, output_path, chunk_size=1024 * 1024):
 
         assert None not in new_video_offsets and None not in new_audio_offsets
 
-        new_video_stco = build_stco(new_video_offsets)
-        new_audio_stco = build_stco(new_audio_offsets)
+        video_offset_type = b'co64' if b'co64' in vr_stbl else b'stco'
+        audio_offset_type = b'co64' if b'co64' in ar_stbl else b'stco'
+        new_video_stco = build_chunk_offsets(video_offset_type, new_video_offsets)
+        new_audio_stco = build_chunk_offsets(audio_offset_type, new_audio_offsets)
 
         def bx(d, key):
             return d[key]['full'] if key in d else b''
@@ -518,7 +529,7 @@ def main():
                     help="手动限制视频峰值码率（bps），例如 20000000 表示 20Mbps")
     args = ap.parse_args()
 
-    check_tools()
+    check_tools(progress_callback=lambda pct, msg: print(msg, flush=True))
 
     ref_path = Path(args.ref)
     input_path = Path(args.input)
