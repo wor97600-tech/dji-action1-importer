@@ -185,6 +185,8 @@ hardware_accel.py   硬件编码检测、回退和兼容性校验
 dji_preview.py      相机预览等长替换
 process_utils.py    Windows 子进程无控制台启动
 assets/             统一应用图标
+tests/              桌面回归测试
+scripts/            窗口布局检查
 CHANGELOG.md        Windows 更新日志
 box_tools.py        MP4/MOV box 解析与构建
 ffmpeg_env.py       桌面版 FFmpeg 定位 / 校验 / 自动安装
@@ -202,9 +204,8 @@ android/            Android 工程（Kotlin + Material 3）
   app/src/test/...          与桌面版输出逐字节对比的单元测试
 
 .github/workflows/
-  release.yml               Windows 标签发布（v5.0 不发布 APK）
+  release.yml               Windows 标签发布 / 手动构建（不发布 APK）
   android.yml               Android 分支 CI
-  build.yml                 Windows 手动构建
 ```
 
 ## 常见问题

@@ -63,7 +63,6 @@ class DesktopUI:
         self.max_bitrate = tk.StringVar(value='2000')
         self.acceleration = tk.StringVar(value='自动选择 · 显卡优先')
         self.ffmpeg_status_var = tk.StringVar(value='正在检查环境…')
-        self.summary_var = tk.StringVar(value='先选择参考视频，再添加待转换内容。')
         self.hint_var = tk.StringVar(value='准备就绪后，点击右下角开始转换。')
         self._controls = []
         self._set_theme()
@@ -72,8 +71,6 @@ class DesktopUI:
         for var in (self.prefix,self.start_number):
             var.trace_add('write',lambda *_: self._update_name_preview())
         self.acceleration.trace_add('write', lambda *_: self._update_encoder_hint())
-        for var in (self.ref_path,self.input_path,self.output_path):
-            var.trace_add('write',lambda *_: self._update_summary())
         self.protocol('WM_DELETE_WINDOW', self._close)
         self.bind('<Control-Return>', lambda e: self._start())
         self._poll_id = self.after(100,self._poll_queue)
@@ -192,11 +189,6 @@ class DesktopUI:
         cpu=MODES.get(self.acceleration.get())=='cpu'
         self.encoder_hint.config(text='CRF 越小画质越高，仅 CPU 使用。\n默认码率上限 2000 kbps（2 Mbps）。\n码率留空跟随参考视频。' if cpu else '显卡优先，失败自动回退 CPU。\n默认码率上限 2000 kbps（2 Mbps）。\nCRF 仅用于 CPU；码率留空跟随参考。')
 
-    def _update_summary(self):
-        ref=Path(self.ref_path.get()).name if self.ref_path.get() else '尚未选择'
-        inp=Path(self.input_path.get()).name if self.input_path.get() else '尚未选择'
-        self.summary_var.set(f'参考  {ref}\n输入  {inp}\n模式  '+('单个视频' if self.mode.get()=='single' else '批量 · 按文件名排序'))
-
     def _on_mode_change(self):
         new=self.mode.get()
         if self._running:return
@@ -210,7 +202,7 @@ class DesktopUI:
         self.output_btn.config(text='选择文件夹' if batch else '保存到')
         if batch:self.frm_naming.grid()
         else:self.frm_naming.grid_remove()
-        self._update_name_preview();self._update_summary()
+        self._update_name_preview()
 
     def _update_name_preview(self):
         try:

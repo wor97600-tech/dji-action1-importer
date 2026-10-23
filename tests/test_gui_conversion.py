@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import dji_graft
 from dji_graft_gui import App
 from dji_preview import replace_camera_preview
-from test_dji_preview import samples
+from tests.test_dji_preview import samples
 
 
 @unittest.skipUnless(os.environ.get('DJI_TEST_REFERENCE'), 'Requires reference MP4')

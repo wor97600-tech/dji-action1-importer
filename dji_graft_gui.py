@@ -20,10 +20,7 @@ from dji_graft import (
 )
 from ffmpeg_env import ensure_ffmpeg, find_ffmpeg, ffmpeg_version
 from utils import find_input_videos
-from desktop_ui import DesktopUI, VERSION
-
-
-APP_VERSION = VERSION
+from desktop_ui import DesktopUI
 
 
 def _enable_dpi_awareness():

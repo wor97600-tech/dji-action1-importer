@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import dji_graft
 import hardware_accel as hw
-from test_amf_headers import payload_digest, trace
+from tests.test_amf_headers import payload_digest, trace
 
 
 class MultiVendorTests(unittest.TestCase):

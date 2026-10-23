@@ -11,7 +11,7 @@ class HiddenProcessTests(unittest.TestCase):
     def test_all_media_launches_request_hidden_windows(self):
         count = 0
         for name in ('dji_graft.py', 'dji_preview.py', 'hardware_accel.py', 'ffmpeg_env.py'):
-            tree = ast.parse(Path(__file__).with_name(name).read_text(encoding='utf-8'))
+            tree = ast.parse((Path(__file__).resolve().parents[1] / name).read_text(encoding='utf-8'))
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                         and isinstance(node.func.value, ast.Name)
