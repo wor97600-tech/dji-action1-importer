@@ -8,14 +8,14 @@ if %errorlevel%==0 (
     set "PY=python"
 )
 
-%PY% -m pip install --upgrade pyinstaller
+%PY% -m pip install -r requirements.txt
 if errorlevel 1 goto :fail
 
-%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --additional-hooks-dir hooks --name DJIGraft dji_graft_gui.py
+%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --additional-hooks-dir hooks --name DJIGraft-5.0-Windows-x64 --version-file windows-version.txt --icon assets/app-icon.ico --add-data "assets;assets" dji_graft_gui.py
 if errorlevel 1 goto :fail
 
 echo.
-echo 打包完成：dist\DJIGraft.exe
+echo 打包完成：dist\DJIGraft-5.0-Windows-x64.exe
 goto :end
 
 :fail

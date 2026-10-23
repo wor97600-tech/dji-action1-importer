@@ -1,94 +1,47 @@
 name: release
-
 on:
   push:
-    tags:
-      - "v*"
-
+    tags: ["v5.0"]
+  workflow_dispatch:
 permissions:
   contents: write
-
 jobs:
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install PyInstaller
-        run: python -m pip install --upgrade pyinstaller
-
+      - name: Install FFmpeg for tests
+        run: choco install ffmpeg -y --no-progress
+      - name: Run regression tests
+        run: python -m unittest discover -v
       - name: Build Windows exe
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --additional-hooks-dir hooks --name DJIGraft dji_graft_gui.py
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-windows
-          path: dist/DJIGraft.exe
-          if-no-files-found: error
-
-  android:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: android
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-
-      - name: Download FFmpegKitNext
-        run: gradle prepareFfmpegKit
-
-      - name: Verify container graft port
-        run: gradle :app:testDebugUnitTest --stacktrace
-
-      - name: Build Android APK
-        run: gradle :app:assembleDebug --stacktrace
-
-      - name: Collect APK
+        run: ./build.ps1
+      - name: Generate SHA256 checksum
+        shell: pwsh
         run: |
-          mkdir -p ../dist
-          cp app/build/outputs/apk/debug/app-debug.apk \
-             "../dist/DJIGraft-Android-${GITHUB_REF_NAME}.apk"
-
+          $file = Get-Item dist/DJIGraft-5.0-Windows-x64.exe
+          $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($file.Name)" | Set-Content dist/SHA256SUMS.txt -Encoding utf8NoBOM
       - uses: actions/upload-artifact@v4
         with:
-          name: release-android
-          path: dist/*.apk
+          name: DJIGraft-v5.0-Windows
+          path: dist/*
           if-no-files-found: error
-
-  publish:
-    needs:
-      - windows
-      - android
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-windows
-          path: dist
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-android
-          path: dist
-
-      - name: List release files
-        run: ls -lh dist
-
-      - name: Publish Windows + Android release
+      - name: Publish Windows v5.0
+        if: github.ref == 'refs/tags/v5.0'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
-          generate_release_notes: true
+          tag_name: v5.0
+          name: DJI Graft v5.0 · Windows 正式版
+          body_path: docs/releases/v5.0.md
+          files: |
+            dist/DJIGraft-5.0-Windows-x64.exe
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          make_latest: true
+          prerelease: false

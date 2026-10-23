@@ -11,6 +11,7 @@
 
 import os
 import shutil
+from process_utils import hidden_process_options
 import subprocess
 import sys
 import tempfile
@@ -86,7 +87,7 @@ def ffmpeg_version(ffmpeg_path):
             encoding="utf-8",
             errors="replace",
             timeout=10,
-        )
+        **hidden_process_options())
         if r.returncode == 0:
             return r.stdout.splitlines()[0].strip()
     except Exception:

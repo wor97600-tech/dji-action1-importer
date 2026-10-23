@@ -6,11 +6,13 @@ dji_graft.py — 流式移植 + 体积控制版
 import argparse
 import json
 import struct
+from process_utils import hidden_process_options
 import subprocess
 import threading
 from pathlib import Path
 
 from ffmpeg_env import ensure_ffmpeg
+from dji_preview import replace_camera_preview
 from box_tools import (
     read_box_list, find_box, build_box, parse_hdlr_type,
     read_box_list_from_file, read_box_payload, read_box_full,
@@ -30,7 +32,7 @@ def configure_ffmpeg(ffmpeg_path, ffprobe_path):
 
 def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace", **hidden_process_options())
 
 
 def ffprobe_json(path):
@@ -65,6 +67,8 @@ def get_ref_targets(ref_path):
         "channels": int(a["channels"]),
         "video_bitrate": int(v.get("bit_rate") or info["format"].get("bit_rate", 35_000_000)),
         "audio_bitrate": int(a.get("bit_rate", 190_000)),
+        "video_timescale": int(v['time_base'].split('/')[1])
+            if v.get('time_base', '').startswith('1/') else None,
     }
 
 
@@ -103,7 +107,7 @@ def _parse_time_str(s):
 def run_ffmpeg_with_progress(cmd, total_duration, label="", progress_callback=None):
     cmd = cmd[:-1] + ["-progress", "pipe:1", "-nostats"] + [cmd[-1]]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             text=True, encoding="utf-8", errors="replace", bufsize=1)
+                             text=True, encoding="utf-8", errors="replace", bufsize=1, **hidden_process_options())
     stderr_chunks = []
 
     def _drain_stderr():
@@ -139,12 +143,20 @@ def run_ffmpeg_with_progress(cmd, total_duration, label="", progress_callback=No
 
 
 def transcode(input_path, out_path, targets, show_progress=True, label="",
-              progress_callback=None, crf=None, max_video_bitrate=None):
+              progress_callback=None, crf=None, max_video_bitrate=None,
+              acceleration='cpu', status_callback=None):
     """
     crf: 0-51，越小画质越好体积越大。推荐 23（默认）或 26（更小体积）。
          None 表示使用固定码率（兼容旧行为）。
     max_video_bitrate: 手动限制峰值码率（bps），覆盖参考文件码率。
     """
+    if acceleration != 'cpu':
+        from hardware_accel import try_hardware
+        status = status_callback or (lambda message: print(message, flush=True))
+        duration = get_duration_seconds(input_path) if progress_callback is not None or show_progress else 0
+        if try_hardware(input_path, out_path, targets, FFMPEG_BIN, FFPROBE_BIN, acceleration,
+                        max_video_bitrate, duration, label, progress_callback, show_progress, status):
+            return
     ab = max(targets["audio_bitrate"], 128_000)
     
     ref_vb = targets["video_bitrate"]
@@ -406,6 +418,9 @@ def graft(ref_path, reencoded_path, output_path, chunk_size=1024 * 1024):
             if meta_size > 0:
                 ref_f.seek(meta_sample_start)
                 meta_sample_bytes = ref_f.read(meta_size)
+                meta_sample_bytes = replace_camera_preview(meta_sample_bytes, reencoded_path, FFMPEG_BIN)
+                if len(meta_sample_bytes) != meta_size:
+                    raise RuntimeError("封面替换不能改变原有 meta 长度")
 
         re_top = read_box_list_from_file(re_f)
         re_moov_info = find_box(re_top, b'moov')

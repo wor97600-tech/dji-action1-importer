@@ -2,7 +2,7 @@
 
 > 把手机、运动相机、屏幕录像等第三方视频，转码并“移植”进 DJI Action 系列相机的原生 MP4 容器结构，让相机能像播放自己拍摄的文件一样正常回放。
 
-**最新版本：v4.0.0** · Windows 桌面版 + Android 手机版
+**Windows 正式版：v5.0** · Android 手机版：v4.0.0（本次不更新）
 
 [下载 Windows 版](#windows-桌面版) · [下载 Android 版](#android-手机版) · [查看 Releases](../../releases)
 
@@ -22,25 +22,35 @@
 
 ## 下载
 
-两个平台的文件放在同一个 GitHub Release 中：
+Windows v5.0 已独立发布；Android 继续使用 v4.0.0，本次不发布 APK。
 
 | 平台 | 文件 | 体积 | 说明 |
 |---|---|---|---|
-| Windows 10/11 | `DJIGraft.exe` | 约 12 MB | 首次转换时自动下载 FFmpeg |
+| Windows 10/11 x64 | [DJIGraft-5.0-Windows-x64.exe](../../releases/download/v5.0/DJIGraft-5.0-Windows-x64.exe) | 约 12.5 MB | 不内置 FFmpeg，可使用已有环境 |
 | Android 8.0+ | `DJIGraft-Android-v4.0.0.apk` | 约 111 MB | 已内置 FFmpeg，离线可用 |
 
-前往 [Releases](../../releases) 下载最新版本。当前 v4.0.0 的校验值：
+前往 [Windows v5.0](../../releases/tag/v5.0) 或 [Android v4.0.0](../../releases/tag/v4.0.0) 下载对应版本。Windows 校验值见 v5.0 附件 `SHA256SUMS.txt`。
 
-- Windows：`C5D5C46FC9BC78EB22C56BAE7D737948A98335E05B547AD8167CD4B67139558E`
 - Android：`2FBF4D5AB739902E046046F6F878DAD656A35F2EA36BB93C330C561E4EC228C4`
 
 > Windows exe 和 Android APK 使用不同的打包方式，体积差异是正常的。原因见下方“为什么 APK 比 exe 大这么多”。
 
 ## Windows 桌面版
 
+### v5.0 更新亮点
+
+- **全新扁平界面**：左侧文件与批量命名，右侧编码设置和日志；开始转换固定在底部。修复批量模式画质和码率说明被裁切的问题。
+- **默认显卡加速**：自动检测 NVIDIA NVENC → Intel Quick Sync → AMD AMF；检测、编码或校验失败时尝试后续编码器，全部失败回退 CPU。也可手动选择编码器。
+- **默认码率上限 2000 kbps（2 Mbps）**：不是 2000 KB/s。留空跟随参考视频；CRF 仅用于 CPU 编码及回退，显卡按码率控制。
+- **封面与播放修复**：使用待转换视频生成相机预览，修复封面颜色异常、错误识别为照片等问题；完善 AMD / NVIDIA 码流兼容性处理。
+- **转换无黑色弹窗**：环境检测、转码、封面等子进程在 Windows 下隐藏控制台。
+- **更清楚的交互**：统一应用图标，加强按钮辨识；输入校验、覆盖确认、运行锁定、日志复制/保存及打开输出位置。
+
+完整记录见 [更新日志](CHANGELOG.md)。显卡加速需要对应硬件、驱动和 FFmpeg 支持 H.264 编码；解码和缩放仍由 CPU 完成。建议先用短片确认相机回放。
+
 ### 直接运行
 
-1. 下载 `DJIGraft.exe`；
+1. 下载 [DJIGraft-5.0-Windows-x64.exe](../../releases/download/v5.0/DJIGraft-5.0-Windows-x64.exe)；
 2. 双击运行，不需要单独安装 Python；
 3. 首次转换时如果系统里没有 FFmpeg，程序会提示并自动下载，
    之后缓存在 `%LOCALAPPDATA%\DJIGraft\bin`；
@@ -50,7 +60,7 @@ Windows 可能提示“未知发布者”，这是因为 exe 没有购买代码�
 
 ### 从源码运行
 
-要求：Python 3.9+，系统已安装 `ffmpeg` / `ffprobe`，或者把这两个 exe 放在程序目录。
+要求：Python 3.10+（推荐 3.12，需包含 Tk），系统已安装 `ffmpeg` / `ffprobe`，或者把这两个 exe 放在程序目录。
 
 ```powershell
 python dji_graft_gui.py
@@ -133,7 +143,7 @@ python dji_graft.py --ref 参考原生文件.MP4 --input 输入视频.mp4 --outp
 .\build.ps1
 ```
 
-输出文件在 `dist\DJIGraft.exe`。生成的 exe 默认不内置 FFmpeg，
+输出文件在 `dist\DJIGraft-5.0-Windows-x64.exe`。生成的 exe 默认不内置 FFmpeg，
 首次使用时会自动下载，因此安装包体积很小。
 
 ### Android APK
@@ -149,28 +159,33 @@ gradle :app:assembleDebug
 
 APK 输出在 `android/app/build/outputs/apk/debug/app-debug.apk`。
 
-### 一次性发布 Windows + Android
+### 发布 Windows 正式版
 
-推送 `v*` 标签会触发 `release` workflow：
+推送 `v5.0` 标签触发 Windows 发布流程：运行自动测试、构建轻量 EXE、生成 SHA-256 校验文件，并使用 `docs/releases/v5.0.md` 发布说明。此流程不构建、不上传 Android APK，手机端保留 v4.0.0。
 
-1. 在 Windows runner 上构建 `DJIGraft.exe`；
-2. 下载并校验 FFmpegKitNext；
-3. 运行 Android 容器移植单元测试；
-4. 构建 APK；
-5. 等两端都成功后，把 `DJIGraft.exe` 和 `DJIGraft-Android-*.apk`
-   一起附加到同一个 GitHub Release。
+### 桌面测试
 
-```bash
-git tag v4.0.0
-git push origin v4.0.0
+```powershell
+python -m unittest discover -v
+python scripts/check_ui_layout.py
 ```
+
+普通测试需要 FFmpeg/ffprobe；布局检查需要 Windows 桌面及 Tk。真实视频及显卡测试的配置见 [开发说明](docs/DEVELOPMENT.md)。
 
 ## 项目结构
 
 ```text
 dji_graft.py        桌面版核心移植逻辑（CLI 单文件）
 batch_dji_graft.py  桌面版 CLI 批量版本
-dji_graft_gui.py    桌面版 tkinter 图形界面
+dji_graft_gui.py    桌面入口与单文件/批量任务
+desktop_ui.py       tkinter 窗口、布局与交互
+ui_model.py         输入校验与任务参数
+ui_theme.py         界面颜色与字体
+hardware_accel.py   硬件编码检测、回退和兼容性校验
+dji_preview.py      相机预览等长替换
+process_utils.py    Windows 子进程无控制台启动
+assets/             统一应用图标
+CHANGELOG.md        Windows 更新日志
 box_tools.py        MP4/MOV box 解析与构建
 ffmpeg_env.py       桌面版 FFmpeg 定位 / 校验 / 自动安装
 utils.py            自然排序等通用工具
@@ -187,7 +202,7 @@ android/            Android 工程（Kotlin + Material 3）
   app/src/test/...          与桌面版输出逐字节对比的单元测试
 
 .github/workflows/
-  release.yml               标签发布：同时构建 Windows 和 Android
+  release.yml               Windows 标签发布（v5.0 不发布 APK）
   android.yml               Android 分支 CI
   build.yml                 Windows 手动构建
 ```
