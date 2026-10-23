@@ -26,7 +26,7 @@ Windows v5.0 已独立发布；Android 继续使用 v4.0.0，本次不发布 APK
 
 | 平台 | 文件 | 体积 | 说明 |
 |---|---|---|---|
-| Windows 10/11 x64 | [DJIGraft-5.0-Windows-x64.exe](../../releases/download/v5.0/DJIGraft-5.0-Windows-x64.exe) | 约 12.5 MB | 不内置 FFmpeg，可使用已有环境 |
+| Windows 10/11 x64 | [DJIGraft-5.0-Windows-x64.exe](../../releases/download/v5.0/DJIGraft-5.0-Windows-x64.exe) | 约 14 MB | 不内置 FFmpeg，可使用已有环境 |
 | Android 8.0+ | `DJIGraft-Android-v4.0.0.apk` | 约 111 MB | 已内置 FFmpeg，离线可用 |
 
 前往 [Windows v5.0](../../releases/tag/v5.0) 或 [Android v4.0.0](../../releases/tag/v4.0.0) 下载对应版本。Windows 校验值见 v5.0 附件 `SHA256SUMS.txt`。
