@@ -1,7 +1,7 @@
 name: release
 on:
   push:
-    tags: ["v5.0"]
+    tags: ["v5.1"]
   workflow_dispatch:
 permissions:
   contents: write
@@ -24,23 +24,23 @@ jobs:
       - name: Generate SHA256 checksum
         shell: pwsh
         run: |
-          $file = Get-Item dist/DJIGraft-5.0-Windows-x64.exe
+          $file = Get-Item dist/DJIGraft-5.1-Windows-x64.exe
           $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $($file.Name)" | Set-Content dist/SHA256SUMS.txt -Encoding utf8NoBOM
       - uses: actions/upload-artifact@v4
         with:
-          name: DJIGraft-v5.0-Windows
+          name: DJIGraft-v5.1-Windows
           path: dist/*
           if-no-files-found: error
-      - name: Publish Windows v5.0
-        if: github.ref == 'refs/tags/v5.0'
+      - name: Publish Windows v5.1
+        if: github.ref == 'refs/tags/v5.1'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v5.0
-          name: DJI Graft v5.0 · Windows 正式版
-          body_path: docs/releases/v5.0.md
+          tag_name: v5.1
+          name: DJI Graft v5.1 · Windows 正式版
+          body_path: docs/releases/v5.1.md
           files: |
-            dist/DJIGraft-5.0-Windows-x64.exe
+            dist/DJIGraft-5.1-Windows-x64.exe
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
           make_latest: true

@@ -5,11 +5,43 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import dji_graft
 from dji_graft_gui import App
 from dji_preview import replace_camera_preview
 from tests.test_dji_preview import samples
+
+
+class BatchQueueExecutionTests(unittest.TestCase):
+    def test_run_batch_uses_queue_names_and_reports_status(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); inputs = root / 'inputs'; inputs.mkdir(); output = root / 'out'
+            first = inputs / 'clip2.mp4'; second = inputs / 'clip10.mp4'
+            first.write_bytes(b'one'); second.write_bytes(b'two')
+            messages = queue.Queue()
+            ui = SimpleNamespace(msg_queue=messages)
+
+            def fake_transcode(source, tmp, targets, **kwargs):
+                tmp.write_bytes(source.read_bytes())
+
+            def fake_graft(ref, tmp, dest):
+                dest.write_bytes(tmp.read_bytes())
+
+            with patch('dji_graft_gui.transcode', fake_transcode), patch('dji_graft_gui.graft', fake_graft):
+                App._run_batch(ui, root / 'reference.mp4', inputs, output, {}, 900, 23, None, 'DJI_', 'cpu', [
+                    (str(second), 'custom.MP4'), (str(first), 'DJI_0900.MP4')
+                ])
+
+            self.assertTrue((output / 'custom.MP4').is_file())
+            self.assertTrue((output / 'DJI_0900.MP4').is_file())
+            statuses = [payload for kind, payload in iter_queue(messages) if kind == 'queue_status']
+            self.assertEqual([status for _, status, _ in statuses], ['转换中', '已完成', '转换中', '已完成'])
+
+
+def iter_queue(messages):
+    while not messages.empty():
+        yield messages.get()
 
 
 @unittest.skipUnless(os.environ.get('DJI_TEST_REFERENCE'), 'Requires reference MP4')

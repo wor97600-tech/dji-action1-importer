@@ -5,8 +5,8 @@
 """
 
 from pathlib import Path
+import tempfile
 
-from PyInstaller.building.datastruct import Tree
 from PyInstaller.utils.hooks.tcl_tk import tcltk_info
 
 
@@ -15,22 +15,29 @@ def _collect_manually(hook_api):
 
     prefix = Path(tkinter.__file__).resolve().parents[2]
     datas = []
+    patched_dir = Path(tempfile.mkdtemp(prefix='djigraft-tcl-'))
 
     for ver in ("8.6", "8.5"):
         tcl_dir = prefix / "tcl" / f"tcl{ver}"
         tk_dir = prefix / "tcl" / f"tk{ver}"
         if tcl_dir.is_dir():
-            datas += Tree(
-                str(tcl_dir),
-                prefix="_tcl_data",
-                excludes=["demos", "*.lib", "tclConfig.sh"],
-            )
+            for path in tcl_dir.rglob('*'):
+                if path.is_file() and path.name not in {'tclConfig.sh'} and 'demos' not in path.parts:
+                    dest = patched_dir / 'tcl' / path.relative_to(tcl_dir)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    data = path.read_bytes()
+                    if path.name == 'init.tcl': data = data.replace(b'package require -exact Tcl 8.6.12', b'package require Tcl 8.6')
+                    dest.write_bytes(data)
+                    datas.append((str(dest), str(Path('_tcl_data') / path.relative_to(tcl_dir).parent)))
         if tk_dir.is_dir():
-            datas += Tree(
-                str(tk_dir),
-                prefix="_tk_data",
-                excludes=["demos", "*.lib", "tkConfig.sh"],
-            )
+            for path in tk_dir.rglob('*'):
+                if path.is_file() and path.name not in {'tkConfig.sh'} and 'demos' not in path.parts:
+                    dest = patched_dir / 'tk' / path.relative_to(tk_dir)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    data = path.read_bytes()
+                    if path.name == 'tk.tcl': data = data.replace(b'package require -exact Tk  8.6.12', b'package require Tk 8.6')
+                    dest.write_bytes(data)
+                    datas.append((str(dest), str(Path('_tk_data') / path.relative_to(tk_dir).parent)))
         if datas:
             break
 
@@ -50,15 +57,7 @@ def _collect_manually(hook_api):
 
 
 def hook(hook_api):
-    if tcltk_info.available:
-        if tcltk_info.tcl_data_missing:
-            raise SystemExit(
-                f"ERROR: Tcl data/library directory ({tcltk_info.tcl_data_dir!r}) could not be collected!"
-            )
-        if tcltk_info.tk_data_missing:
-            raise SystemExit(
-                f"ERROR: Tk data/library directory ({tcltk_info.tk_data_dir!r}) could not be collected!"
-            )
-        hook_api.add_datas(tcltk_info.data_files)
-    else:
-        _collect_manually(hook_api)
+    # The bundled workspace Python reports Tcl as available but its runtime
+    # layout is nonstandard. Collect the scripts explicitly at the locations
+    # expected by PyInstaller's tkinter runtime hook.
+    _collect_manually(hook_api)

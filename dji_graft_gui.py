@@ -7,6 +7,7 @@
 
 import sys
 import traceback
+import os
 from pathlib import Path
 
 import tkinter as tk
@@ -55,7 +56,7 @@ def run_selftest():
 
 
 class App(DesktopUI, tk.Tk):
-    def _worker(self, mode, ref, inp, out, start_num, crf, max_br, prefix, acceleration='cpu'):
+    def _worker(self, mode, ref, inp, out, start_num, crf, max_br, prefix, acceleration='cpu', queue_items=None):
         try:
             self.msg_queue.put(("log", "检查 ffmpeg 环境 ..."))
             ffmpeg_path, ffprobe_path = ensure_ffmpeg(
@@ -94,7 +95,7 @@ class App(DesktopUI, tk.Tk):
             if mode == "single":
                 self._run_single(ref, Path(inp), Path(out), targets, crf, max_br, acceleration)
             else:
-                self._run_batch(ref, Path(inp), Path(out), targets, start_num, crf, max_br, prefix, acceleration)
+                self._run_batch(ref, Path(inp), Path(out), targets, start_num, crf, max_br, prefix, acceleration, queue_items)
 
             self.msg_queue.put(("log", "\n处理结束。"))
         except Exception as exc:
@@ -132,9 +133,14 @@ class App(DesktopUI, tk.Tk):
         )
         self.msg_queue.put(("openable", str(out.parent)))
 
-    def _run_batch(self, ref, input_dir, output_dir, targets, start_num, crf, max_br, prefix, acceleration='cpu'):
+    def _run_batch(self, ref, input_dir, output_dir, targets, start_num, crf, max_br, prefix, acceleration='cpu', queue_items=None):
         output_dir.mkdir(parents=True, exist_ok=True)
-        videos = find_input_videos(input_dir)
+        if queue_items is None:
+            videos = find_input_videos(input_dir)
+            entries = [(video, f"{prefix}{start_num + index:04d}.MP4") for index, video in enumerate(videos)]
+        else:
+            entries = [(Path(source), output_name) for source, output_name in queue_items]
+            videos = [source for source, _ in entries]
         if not videos:
             self.msg_queue.put(("log", "文件夹里没有找到支持的视频文件"))
             self.msg_queue.put(("openable", str(output_dir)))
@@ -143,14 +149,13 @@ class App(DesktopUI, tk.Tk):
         self.msg_queue.put(
             ("log", f"共发现 {len(videos)} 个文件（已按文件名自然排序），从编号 {start_num} 开始命名")
         )
-        number = start_num
         ok_count, fail_count = 0, 0
 
-        for idx, video in enumerate(videos, 1):
-            out_name = f"{prefix}{number:04d}.MP4"
+        for idx, (video, out_name) in enumerate(entries, 1):
             out_path = output_dir / out_name
             tmp_path = out_path.with_suffix(".reencoded_tmp.mp4")
             self.msg_queue.put(("log", f"\n[{idx}/{len(videos)}] {video.name} -> {out_name}"))
+            self.msg_queue.put(('queue_status', (str(video), '转换中', '')))
             try:
                 transcode(
                     video,
@@ -170,14 +175,14 @@ class App(DesktopUI, tk.Tk):
                 in_size = video.stat().st_size
                 ratio = out_size / in_size if in_size > 0 else 0
                 self.msg_queue.put(("log", f"  完成 ✅ ({out_size/1024/1024:.1f} MB, 比 {ratio:.2f}x)"))
+                self.msg_queue.put(('queue_status', (str(video), '已完成', '')))
                 ok_count += 1
             except Exception as exc:
                 self.msg_queue.put(("log", f"  失败 ❌ {exc}"))
+                self.msg_queue.put(('queue_status', (str(video), '失败', str(exc))))
                 fail_count += 1
             finally:
                 tmp_path.unlink(missing_ok=True)
-            number += 1
-
         self.msg_queue.put(("log", f"\n批量转换完成：成功 {ok_count} 个，失败 {fail_count} 个"))
         self.msg_queue.put(("openable", str(output_dir)))
 
@@ -186,10 +191,16 @@ def main():
         run_selftest()
         return
     _enable_dpi_awareness()
+    if getattr(sys, '_MEIPASS', None):
+        # Keep the bundled Tcl/Tk lookup explicit for one-file builds made
+        # from environments whose Tcl installation is outside the normal
+        # Python prefix.
+        os.environ['TCL_LIBRARY'] = str(Path(sys._MEIPASS) / '_tcl_data')
+        os.environ['TK_LIBRARY'] = str(Path(sys._MEIPASS) / '_tk_data')
     if sys.platform == "win32":
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DJIGraft.Desktop.5.0")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DJIGraft.Desktop.5.1")
         except (OSError, AttributeError):
             pass
     app = App()
