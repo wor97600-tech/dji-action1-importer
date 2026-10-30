@@ -1,9 +1,14 @@
 $ErrorActionPreference = "Stop"
 
-if (Get-Command py -ErrorAction SilentlyContinue) {
+# setup-python places the requested interpreter on PATH as `python`.  The
+# Windows `py` launcher may still resolve to a different system version
+# (for example 3.15), which can break PyInstaller's Tcl/Tk discovery.
+if (Get-Command python -ErrorAction SilentlyContinue) {
+    $Py = "python"
+} elseif (Get-Command py -ErrorAction SilentlyContinue) {
     $Py = "py"
 } else {
-    $Py = "python"
+    throw "未找到 Python。请安装 Python 或运行 GitHub Actions 的 setup-python。"
 }
 
 & $Py -m pip install -r requirements.txt
