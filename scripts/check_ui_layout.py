@@ -9,7 +9,7 @@ with patch('desktop_ui.disclaimer_acknowledged', return_value=True):
 a.update()
 assert a.acceleration.get()=='自动选择 · 显卡优先'
 assert a.max_bitrate.get()=='2000'
-assert '5.2' in a.title()
+assert '5.3' in a.title()
 results=[]
 for w,h in [(1200,760),(1040,680),(1280,800)]:
     a.geometry(f'{w}x{h}');a.update()

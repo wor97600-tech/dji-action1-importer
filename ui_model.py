@@ -26,6 +26,20 @@ class BatchQueueItem:
     status: str = '等待转换'
     error: str = ''
     custom_name: bool = False
+    added_manually: bool = False
+
+
+def renumber_batch_queue(items, prefix='DJI_', start_number=0):
+    """Assign automatic names from visible positions; retain explicit names."""
+    if start_number < 0 or start_number + len(items) - 1 > 9999:
+        raise ValueError('批量编号必须在 0–9999 之间，请调整起始编号或队列数量。')
+    for index, item in enumerate(items):
+        if item.custom_name:
+            continue
+        name = f'{prefix}{start_number + index:04d}.MP4'
+        if item.output_name != name:
+            item.output_name = name
+            item.status, item.error = '等待转换', ''
 
 
 def build_batch_queue(videos, prefix='DJI_', start_number=0):
@@ -143,18 +157,22 @@ def format_reference_specs(info):
         parts.append(f'{audio_codec} {rate_label} / {channels} ch')
     return ' · '.join(parts)
 
-def validate_form(values):
+def validate_form(values, queue_items=None):
     v = {k: str(x).strip() for k, x in values.items()}
     mode = v['mode']
     if mode not in ('single', 'batch'): raise ValueError('请选择单个视频或批量转换。')
     if not v['ref'] or not Path(v['ref']).is_file(): raise ValueError('请选择相机拍摄的参考视频。')
-    if not v['inp']: raise ValueError('请选择待转换视频或文件夹。')
+    queued_batch = mode == 'batch' and bool(queue_items)
+    if mode == 'batch' and queue_items is not None and not queue_items:
+        raise ValueError('请先向队列添加 MP4 视频。')
+    if not v['inp'] and not queued_batch: raise ValueError('请选择待转换视频或文件夹。')
     inp, ref = Path(v['inp']), Path(v['ref'])
-    if not (inp.is_file() if mode == 'single' else inp.is_dir()):
+    if not queued_batch and not (inp.is_file() if mode == 'single' else inp.is_dir()):
         raise ValueError('输入路径无效，请重新选择视频。' if mode == 'single' else '批量模式需要选择文件夹。')
     if not v['out']: raise ValueError('请选择输出位置。')
     out = Path(v['out'])
-    if out.resolve() in (inp.resolve(), ref.resolve()): raise ValueError('输出位置不能与输入或参考文件相同。')
+    if out.resolve() == ref.resolve() or (not queued_batch and out.resolve() == inp.resolve()):
+        raise ValueError('输出位置不能与输入或参考文件相同。')
     if mode == 'single' and (out.suffix.lower() != '.mp4' or out.is_dir()):
         raise ValueError('输出文件名必须以 .MP4 结尾。')
     if mode == 'batch' and out.exists() and not out.is_dir():raise ValueError('批量输出必须是文件夹。')

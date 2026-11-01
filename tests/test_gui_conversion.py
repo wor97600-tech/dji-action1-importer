@@ -2,6 +2,7 @@ import os
 import queue
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,75 @@ from tests.test_dji_preview import samples
 
 
 class BatchQueueExecutionTests(unittest.TestCase):
+    def test_cancel_cannot_observe_old_current_after_next_item_is_claimed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first, second = root / 'first.mp4', root / 'second.mp4'
+            first.write_bytes(b'first'); second.write_bytes(b'second')
+            checking, release_check, second_started, finish = (threading.Event() for _ in range(4))
+            stop = threading.Event()
+            class PausedCheck:
+                def is_set(self):
+                    value = stop.is_set()
+                    checking.set()
+                    if not release_check.wait(3): raise RuntimeError('test timeout')
+                    return value
+            ui = SimpleNamespace(msg_queue=queue.Queue(), _stop_after_current=PausedCheck(),
+                                 _dispatch_lock=threading.Lock(), _active_batch_source=None)
+            observed = []
+            def cancel():
+                with ui._dispatch_lock:
+                    stop.set()
+                    observed.append(ui._active_batch_source)
+                finish.set()
+            def transcode(source, temporary, targets, **kwargs):
+                if source == second:
+                    second_started.set()
+                    if not finish.wait(3): raise RuntimeError('test timeout')
+                temporary.write_bytes(source.read_bytes())
+            def graft(reference, temporary, destination):
+                destination.write_bytes(temporary.read_bytes())
+            with patch('dji_graft_gui.get_duration_seconds', return_value=1), \
+                 patch('dji_graft_gui.transcode', transcode), patch('dji_graft_gui.graft', graft):
+                worker = threading.Thread(target=App._run_batch, args=(ui, root/'ref.mp4', root,
+                    root/'out', {}, 0, 23, None, 'DJI_', 'cpu',
+                    [(str(first), 'one.MP4'), (str(second), 'two.MP4')]))
+                worker.start()
+                try:
+                    self.assertTrue(checking.wait(3))
+                    canceller = threading.Thread(target=cancel)
+                    canceller.start()
+                    release_check.set()
+                    self.assertTrue(second_started.wait(3))
+                    canceller.join(3)
+                    worker.join(3)
+                    self.assertEqual(observed, [str(second)])
+                finally:
+                    release_check.set(); finish.set(); worker.join(3)
+
+    def test_cancel_finishes_current_output_and_never_starts_next(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first, second = root / 'first.mp4', root / 'second.mp4'
+            first.write_bytes(b'first video'); second.write_bytes(b'second video')
+            event = threading.Event()
+            ui = SimpleNamespace(msg_queue=queue.Queue(), _stop_after_current=event)
+            def transcode(source, temporary, targets, **kwargs):
+                temporary.write_bytes(source.read_bytes())
+                event.set()  # User clicks stop while the first conversion runs.
+            def graft(reference, temporary, destination):
+                destination.write_bytes(temporary.read_bytes())
+            with patch('dji_graft_gui.get_duration_seconds', return_value=1), \
+                 patch('dji_graft_gui.transcode', transcode), patch('dji_graft_gui.graft', graft):
+                App._run_batch(ui, root / 'ref.mp4', root, root / 'out', {}, 0, 23, None,
+                               'DJI_', 'cpu', [(str(first), 'DJI_0000.MP4'), (str(second), 'DJI_0001.MP4')])
+            self.assertEqual((root / 'out/DJI_0000.MP4').read_bytes(), b'first video')
+            self.assertFalse((root / 'out/DJI_0001.MP4').exists())
+            self.assertFalse(list((root / 'out').glob('*.reencoded_tmp.mp4')))
+            statuses = [payload for kind, payload in iter_queue(ui.msg_queue) if kind == 'queue_status']
+            self.assertEqual([(Path(source).name, status) for source, status, _ in statuses],
+                             [('first.mp4', '转换中'), ('first.mp4', '已完成')])
+
     def test_run_batch_uses_queue_names_and_reports_status(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); inputs = root / 'inputs'; inputs.mkdir(); output = root / 'out'

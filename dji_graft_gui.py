@@ -8,6 +8,7 @@
 import sys
 import traceback
 import os
+from contextlib import nullcontext
 from pathlib import Path
 
 import tkinter as tk
@@ -163,6 +164,12 @@ class App(DesktopUI, tk.Tk):
         ok_count, fail_count = 0, 0
 
         for idx, (video, out_name) in enumerate(entries, 1):
+            with getattr(self, '_dispatch_lock', nullcontext()):
+                stop = getattr(self, '_stop_after_current', None)
+                if idx > 1 and stop is not None and stop.is_set():
+                    self.msg_queue.put(('log', '已取消剩余任务。'))
+                    break
+                self._active_batch_source = str(video)
             out_path = output_dir / out_name
             tmp_path = out_path.with_suffix(".reencoded_tmp.mp4")
             self.msg_queue.put(("log", f"\n[{idx}/{len(videos)}] {video.name} -> {out_name}"))
@@ -220,7 +227,7 @@ def main():
     if sys.platform == "win32":
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DJIGraft.Desktop.5.2")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DJIGraft.Desktop.5.3")
         except (OSError, AttributeError):
             pass
     app = App()

@@ -12,6 +12,7 @@ import os
 import queue
 import sys
 import threading
+import time
 from pathlib import Path
 import tkinter as tk
 from tkinter import font as tkfont
@@ -19,15 +20,16 @@ from tkinter import ttk, filedialog, messagebox
 
 from ffmpeg_env import ensure_ffmpeg, find_ffmpeg, ffmpeg_version
 from dji_graft import configure_ffmpeg, ffprobe_json
-from utils import find_input_videos
+from queue_files import readable_mp4, refresh_mp4_items
 from app_info import disclaimer_acknowledged, show_disclaimer, show_about
-from ui_model import (validate_form, build_batch_queue, validate_queue_names,
+from ui_model import (validate_form, validate_queue_names,
                       pending_batch_items, format_reference_specs,
-                      estimate_remaining_seconds, format_eta, sort_batch_queue)
+                      estimate_remaining_seconds, format_eta, sort_batch_queue,
+                      BatchQueueItem, renumber_batch_queue)
 from ui_theme import (COLORS as C, FONT, colors_for, load_theme_preference,
                       save_theme_preference)
 
-VERSION = 'v5.2'
+VERSION = 'v5.3'
 QUEUE_SORTS = {'名称 · 升序': 'name_asc', '名称 · 降序': 'name_desc',
                '修改时间 · 最早优先': 'modified_asc', '修改时间 · 最新优先': 'modified_desc',
                '创建时间 · 最早优先': 'created_asc', '创建时间 · 最新优先': 'created_desc'}
@@ -224,6 +226,77 @@ class HelpHint(tk.Canvas):
             self._tooltip = None
 
 
+class RefreshIcon(tk.Canvas):
+    """A bare, keyboard-accessible refresh glyph with one-turn feedback."""
+    def __init__(self, parent, command, scale):
+        size = max(24, round(30 * scale))
+        super().__init__(parent, width=size, height=size, bg=C['surface'],
+                         highlightthickness=0, borderwidth=0, takefocus=True, cursor='hand2')
+        self._command = command
+        self._scheduler = self.winfo_toplevel()
+        self._tick = self._pending_command = None
+        self._spinning = False
+        self._center = size / 2
+        self._radius = 8 * scale
+        self._arrow_size = 3 * scale
+        self._angle = 0
+        center, radius = self._center, self._radius
+        self._arc = self.create_arc(center-radius, center-radius, center+radius, center+radius,
+                                    start=0, extent=-285, style='arc', width=max(1, 2*scale),
+                                    outline=C['action'], disabledoutline=C['muted'])
+        self._arrow = self.create_polygon(0, 0, 0, 0, 0, 0, fill=C['action'],
+                                          disabledfill=C['muted'], outline='')
+        self._draw_angle(0)
+        for event in ('<Button-1>', '<Return>', '<space>'):
+            self.bind(event, self._invoke)
+        self.bind('<Destroy>', self._cleanup, add='+')
+
+    def _invoke(self, _event=None):
+        if str(self.cget('state')) == 'disabled' or self._spinning: return
+        self._spinning = True
+        self._rotation_started = time.monotonic()
+        self._animate()
+        self._pending_command = self._scheduler.after_idle(self._run_command)
+
+    def _run_command(self):
+        self._pending_command = None
+        self._command()
+
+    def _animate(self):
+        self._tick = None
+        progress = min(1.0, (time.monotonic() - self._rotation_started) / 0.5)
+        eased = progress * progress * (3 - 2 * progress)
+        self._draw_angle(0 if progress >= 1 else -360 * eased)
+        if progress < 1:
+            self._tick = self._scheduler.after(16, self._animate)
+        else:
+            self._spinning = False
+
+    def _draw_angle(self, angle):
+        self._angle = angle
+        self.itemconfigure(self._arc, start=angle)
+        radians = math.radians(angle - 285)
+        radial_x, radial_y = math.cos(radians), -math.sin(radians)
+        tangent_x, tangent_y = math.sin(radians), math.cos(radians)
+        x = self._center + self._radius * radial_x
+        y = self._center + self._radius * radial_y
+        size = self._arrow_size
+        self.coords(self._arrow,
+                    x + size*tangent_x, y + size*tangent_y,
+                    x - size*tangent_x + size*radial_x, y - size*tangent_y + size*radial_y,
+                    x - size*tangent_x - size*radial_x, y - size*tangent_y - size*radial_y)
+
+    def apply_theme(self):
+        self.configure(bg=C['surface'])
+        self.itemconfigure(self._arc, outline=C['action'], disabledoutline=C['muted'])
+        self.itemconfigure(self._arrow, fill=C['action'], disabledfill=C['muted'])
+
+    def _cleanup(self, event):
+        if event.widget is self:
+            for timer in (self._tick, self._pending_command):
+                if timer is not None: self._scheduler.after_cancel(timer)
+
+
 class DesktopUI:
     def __init__(self):
         super().__init__()
@@ -253,6 +326,13 @@ class DesktopUI:
         self._mode_paths = {'single': ('',''), 'batch': ('','')}
         self._open_dir = None
         self._batch_queue = []
+        self._queue_folder = None
+        self._single_pending = []
+        self._single_active = None
+        self._stop_after_current = threading.Event()
+        self._dispatch_lock = threading.Lock()
+        self._bulk_pending_states = []
+        self._active_batch_source = None
         self._failed_queue = []
         self._reference_probe_id = 0
         self._reference_probe_pending = False
@@ -315,7 +395,9 @@ class DesktopUI:
                         rowheight=u(30),background=C['surface'],fieldbackground=C['surface'],
                         foreground=C['text'],bordercolor=C['border'])
         style.configure('Treeview.Heading',background=C['bg'],foreground=C['secondary'],
-                        relief='flat')
+                        bordercolor=C['border'], lightcolor=C['bg'], darkcolor=C['border'], relief='flat')
+        style.map('Treeview.Heading', background=[('pressed', C['border']), ('active', C['tint'])],
+                  foreground=[('pressed', C['text']), ('active', C['text'])])
         style.map('Treeview',background=[('selected',C['tint'])],
                   foreground=[('selected',C['text'])])
         style.configure('Quiet.TButton', background=C['surface'], foreground=C['muted'],
@@ -417,6 +499,8 @@ class DesktopUI:
                 widget.apply_theme()
             elif isinstance(widget, HelpHint):
                 widget.apply_theme()
+            elif isinstance(widget, RefreshIcon):
+                widget.apply_theme()
             elif isinstance(widget, tk.Text):
                 widget.configure(bg=C['bg'], fg=C['secondary'], insertbackground=C['text'],
                                  selectbackground=C['action'], selectforeground=C['surface'])
@@ -429,6 +513,7 @@ class DesktopUI:
         self._queue_hover_color = C['surface']
         self._hide_queue_tooltip()
         self._sync_hover_button_styles()
+        self._schedule_queue_actions()
         try:
             save_theme_preference(self._theme_name)
         except OSError as exc:
@@ -516,20 +601,30 @@ class DesktopUI:
         queue_header = ttk.Frame(self.queue_frame)
         queue_header.grid(row=0, column=0, sticky='ew', pady=(0, u(6)))
         queue_header.columnconfigure(0, weight=1)
-        ttk.Label(queue_header, text='批量队列 · 双击改名', style='Section.TLabel').grid(row=0, column=0, sticky='w')
+        ttk.Label(queue_header, text='批量队列 · 可拖入 MP4', style='Section.TLabel').grid(row=0, column=0, sticky='w')
         ttk.Label(queue_header, text='排序', style='Muted.TLabel').grid(row=0, column=1, padx=(u(8), u(4)))
         self.queue_sort_box = ttk.Combobox(queue_header, textvariable=self.queue_sort,
                                          values=list(QUEUE_SORTS), state='readonly', width=21)
         self.queue_sort_box.grid(row=0, column=2, sticky='e')
         self.queue_sort_box.bind('<<ComboboxSelected>>', self._sort_queue)
         self._controls.append(self.queue_sort_box)
+        self.refresh_queue_btn = RefreshIcon(queue_header, self._refresh_batch_queue, self.ui_scale)
+        self.refresh_queue_btn.grid(row=0, column=3, padx=(u(8), 0))
+        self._refresh_tip = None
+        self.refresh_queue_btn.bind('<Enter>', self._show_refresh_tooltip)
+        self.refresh_queue_btn.bind('<Leave>', self._hide_refresh_tooltip)
+        self.refresh_queue_btn.bind('<Button-1>', self._hide_refresh_tooltip, add='+')
+        self._controls.append(self.refresh_queue_btn)
         tree_wrap = ttk.Frame(self.queue_frame); tree_wrap.grid(row=1, column=0, sticky='nsew'); tree_wrap.columnconfigure(0, weight=1); tree_wrap.rowconfigure(0, weight=1)
-        self.queue_tree = ttk.Treeview(tree_wrap, columns=('source', 'output', 'status', 'action'), show='headings', height=8)
+        self.queue_tree = ttk.Treeview(tree_wrap, columns=('source', 'output', 'status', 'action', 'move'), show='headings', height=8)
         self._queue_font=tkfont.Font(root=self,family=FONT,size=-u(13))
         ttk.Style(self).configure('Treeview',font=self._queue_font,rowheight=u(30))
-        for col, title, width in (('source', '原视频', 180), ('output', '输出文件名', 270), ('status', '状态', 82), ('action', '操作', 108)):
+        for col, title, width in (('source', '原视频', 150), ('output', '输出文件名 · 双击修改', 240), ('status', '状态', 72), ('action', '操作', 108), ('move', '排序', 40)):
             self.queue_tree.heading(col, text=title)
             self.queue_tree.column(col, width=u(width), minwidth=u({'source':100,'output':150}.get(col,width)), anchor='w', stretch=(col in ('source', 'output')))
+        heading_font = tkfont.Font(root=self, font=ttk.Style(self).lookup('Treeview.Heading', 'font'))
+        move_width = max(u(56), heading_font.measure('排序') + u(24))
+        self.queue_tree.column('move', width=move_width, minwidth=move_width)
         self.queue_tree.grid(row=0, column=0, sticky='nsew')
         self.queue_tree.tag_configure('waiting', foreground=C['text'])
         self.queue_tree.tag_configure('running', foreground=C['action'])
@@ -544,16 +639,20 @@ class DesktopUI:
         queue_scroll = ttk.Scrollbar(tree_wrap, orient='vertical', command=self.queue_tree.yview)
         queue_scroll.grid(row=0, column=1, sticky='ns')
         self._queue_action_buttons = []
+        self._queue_move_buttons = []
         self._queue_actions_after = None
         def scroll_changed(first,last):
             queue_scroll.set(first,last)
             self._schedule_queue_actions()
         self.queue_tree.configure(yscrollcommand=scroll_changed)
         self.queue_tree.bind('<Configure>', lambda _e: self._schedule_queue_actions(), add='+')
+        self.queue_tree.bind('<<TreeviewSelect>>', lambda _e: self._schedule_queue_actions(), add='+')
         self.queue_tree.bind('<Double-1>', self._edit_queue_name)
         self.queue_tree.bind('<Button-1>', self._queue_action_click)
         self.queue_tree.bind('<Motion>', self._queue_hover_motion)
         self.queue_tree.bind('<Leave>', self._queue_leave)
+        from windows_drop import WindowsFileDrop
+        self._file_drop = WindowsFileDrop(self.queue_tree, self._drop_queue_files)
         self.queue_frame.grid_remove()
 
         quality=ttk.Frame(right);quality.grid(row=0,column=0,sticky='ew',pady=(0,u(12)));quality.columnconfigure(0,weight=1);quality.columnconfigure(1,weight=1)
@@ -591,7 +690,7 @@ class DesktopUI:
         self.progress=ttk.Progressbar(self.footer,mode='determinate',maximum=100);self.progress.grid(row=1,column=0,sticky='ew',pady=(u(8),u(4)),padx=(0,u(24)))
         self.hint_label=ttk.Label(self.footer,textvariable=self.hint_var,style='Muted.TLabel',wraplength=u(600));self.hint_label.grid(row=2,column=0,sticky='w')
         self.open_btn=RoundedActionButton(self.footer,'打开输出位置',self._open_output,scale=self.ui_scale,state='disabled');self.open_btn.grid(row=0,column=1,rowspan=3,padx=(0,u(12)));self._controls.append(self.open_btn)
-        self.start_btn=RoundedActionButton(self.footer,'开始转换  →',self._start,primary=True,scale=self.ui_scale);self.start_btn.grid(row=0,column=2,rowspan=3);self._controls.append(self.start_btn)
+        self.start_btn=RoundedActionButton(self.footer,'开始转换  →',self._start_or_cancel,primary=True,scale=self.ui_scale);self.start_btn.grid(row=0,column=2,rowspan=3)
         self.retry_btn=RoundedActionButton(self.footer,'重试失败视频',self._retry_failed,scale=self.ui_scale,state='disabled');self.retry_btn.grid(row=0,column=3,rowspan=3,padx=(u(12),0));self._controls.append(self.retry_btn)
         self._log('欢迎使用 DJI Graft。选择参考视频和输入内容后即可开始。')
 
@@ -607,7 +706,7 @@ class DesktopUI:
             self._mode_paths[self._mode_active]=(self.input_path.get(),self.output_path.get())
             self.input_path.set(self._mode_paths[new][0]);self.output_path.set(self._mode_paths[new][1]);self._mode_active=new
         batch=new=='batch'
-        self.input_title.config(text='02  输入文件夹' if batch else '02  待转换视频')
+        self.input_title.config(text='02  输入文件夹（可选）' if batch else '02  待转换视频')
         self.output_title.config(text='03  输出文件夹' if batch else '03  输出文件')
         self.input_btn.config(text='选择文件夹' if batch else '选择视频')
         self.output_btn.config(text='选择文件夹' if batch else '保存到')
@@ -673,30 +772,103 @@ class DesktopUI:
             if self.mode.get() == 'batch': self._refresh_batch_queue()
 
     def _refresh_batch_queue(self):
-        if not hasattr(self, 'queue_tree') or self.mode.get() != 'batch': return
-        self._hide_queue_tooltip()
+        if not hasattr(self, 'queue_tree') or self.mode.get() != 'batch' or self._running: return
         try:
-            videos = find_input_videos(Path(self.input_path.get())) if Path(self.input_path.get()).is_dir() else []
-            previous = {str(item.source): item for item in self._batch_queue}
-            defaults = build_batch_queue(videos, self.prefix.get() or 'DJI_', int(self.start_number.get() or '0'))
-            for item in defaults:
-                old = previous.get(str(item.source))
-                if old:
-                    item.output_name = old.output_name
-                    item.custom_name = old.custom_name
-                    item.status, item.error = old.status, old.error
-            self._batch_queue = sort_batch_queue(defaults, QUEUE_SORTS[self.queue_sort.get()])
-        except (OSError, ValueError):
-            self._batch_queue = []
+            folder = Path(self.input_path.get()).resolve() if self.input_path.get().strip() else None
+            previous = self._batch_queue if folder == self._queue_folder else [item for item in self._batch_queue if item.added_manually]
+            items, skipped = refresh_mp4_items(folder, previous)
+            if folder != self._queue_folder and not previous:
+                items = sort_batch_queue(items, QUEUE_SORTS[self.queue_sort.get()])
+            self._renumber_queue(items)
+            self._batch_queue = items
+            self._queue_folder = folder
+        except (OSError, ValueError) as exc:
+            self.hint_var.set(f'更新队列失败：{exc}')
+            return
+        self._render_batch_queue()
+        self.hint_var.set(f'队列已更新，共 {len(self._batch_queue)} 个视频。' +
+                          (f'跳过 {skipped} 个无效、未写完或暂时不可读的 MP4。' if skipped else '可拖入 MP4，双击输出文件名可改名。'))
+
+    def _show_refresh_tooltip(self, _event=None):
+        self._hide_refresh_tooltip()
+        tip = self._refresh_tip = tk.Toplevel(self)
+        tip.overrideredirect(True)
+        ttk.Label(tip, text='更新队列', padding=self.u(6)).pack()
+        tip.geometry(f'+{self.refresh_queue_btn.winfo_rootx()}+{self.refresh_queue_btn.winfo_rooty()+self.refresh_queue_btn.winfo_height()+4}')
+
+    def _hide_refresh_tooltip(self, _event=None):
+        if self._refresh_tip is not None:
+            self._refresh_tip.destroy()
+            self._refresh_tip = None
+
+    def _renumber_queue(self, items):
+        renumber_batch_queue(items, self.prefix.get() or 'DJI_', int(self.start_number.get() or '0'))
+
+    def _render_batch_queue(self):
+        self._hide_queue_tooltip()
+        selected = self.queue_tree.selection()
         self._failed_queue = [item for item in self._batch_queue if item.status == '失败']
         for row in self.queue_tree.get_children(): self.queue_tree.delete(row)
         for item in self._batch_queue:
             self.queue_tree.insert('', 'end', iid=str(item.source), values=(item.source.name, item.output_name, item.status, self._queue_action_text(item.status)), tags=(self._queue_status_tag(item.status),))
+        for row in selected:
+            if self.queue_tree.exists(row): self.queue_tree.selection_add(row)
         self._schedule_queue_actions()
+
+    def _drop_queue_files(self, paths):
+        if self._notice_pending or self.mode.get() != 'batch': return
+        if self._running:
+            self.hint_var.set('请等待当前转换队列完成后再拖入新视频。')
+            return
+        items = list(self._batch_queue)
+        known = {item.source.resolve() for item in items}
+        for value in paths:
+            try:
+                path = Path(value).resolve()
+                valid = path not in known and readable_mp4(path)
+            except OSError:
+                valid = False
+            if valid:
+                items.append(BatchQueueItem(path, '', added_manually=True))
+                known.add(path)
+        try:
+            self._renumber_queue(items)
+        except ValueError as exc:
+            self._show_error(str(exc)); return
+        count = len(items) - len(self._batch_queue)
+        self._batch_queue = items
+        if count and not self.output_path.get().strip():
+            self.output_path.set(str(items[-count].source.parent / 'DJI_Output'))
+        self._render_batch_queue()
+        self.hint_var.set(f'已添加 {count} 个视频；重复、无效或暂时不可读的文件已忽略。')
+
+    def _move_queue_item(self, item, offset):
+        if self._running or item not in self._batch_queue: return
+        index = self._batch_queue.index(item)
+        target = index + offset
+        if not 0 <= target < len(self._batch_queue): return
+        items = list(self._batch_queue)
+        items[index], items[target] = items[target], items[index]
+        try:
+            self._renumber_queue(items)
+        except ValueError as exc:
+            self._show_error(str(exc)); return
+        self._batch_queue = items
+        self._render_batch_queue()
+        self.queue_tree.selection_set(str(item.source))
+        self.queue_tree.see(str(item.source))
+        self.hint_var.set('已调整顺序，自动输出编号已同步更新。')
 
     def _schedule_queue_actions(self):
         if self._queue_actions_after is None:
             self._queue_actions_after = self.after_idle(self._layout_queue_actions)
+
+    @staticmethod
+    def _invoke_queue_triangle(event):
+        triangle = event.widget
+        if not triangle.instate(['disabled']):
+            triangle._queue_command()
+        return 'break'
 
     def _layout_queue_actions(self):
         """Reuse real buttons over visible action cells, including after scrolling."""
@@ -704,37 +876,71 @@ class DesktopUI:
         visible = []
         height = self.queue_tree.winfo_height()
         width = self.queue_tree.winfo_width()
+        if width > self.u(500):
+            available = width - sum(self.queue_tree.column(col, 'width') for col in ('status', 'action', 'move')) - self.u(4)
+            source_width = max(self.u(100), round(available * 0.4))
+            output_width = max(self.u(150), available - source_width)
+            self.queue_tree.column('source', width=source_width)
+            self.queue_tree.column('output', width=output_width)
         for item in self._batch_queue:
             box = self.queue_tree.bbox(str(item.source), 'action')
             if box and box[1] >= 0 and box[1]+box[3] <= height and box[0]+box[2] <= width:
                 visible.append((item, box))
         while len(self._queue_action_buttons) < len(visible):
             self._queue_action_buttons.append(ttk.Button(self.queue_tree, style='QueueAction.TButton'))
+            triangles = []
+            for _ in range(2):
+                triangle = ttk.Label(self.queue_tree, anchor='center', padding=0, borderwidth=0,
+                                     relief='flat', font=(FONT, -self.u(11)), takefocus=True)
+                for event in ('<Button-1>', '<Return>', '<space>'):
+                    triangle.bind(event, self._invoke_queue_triangle)
+                triangles.append(triangle)
+            self._queue_move_buttons.append(tuple(triangles))
         for index, button in enumerate(self._queue_action_buttons):
             if index >= len(visible):
                 button.place_forget()
+                for move_button in self._queue_move_buttons[index]: move_button.place_forget()
                 continue
             item, (x,y,w,h) = visible[index]
+            disabled = (item.status in ('转换中', '排队中') or
+                        (self._running and (str(item.source) == self._active_batch_source or
+                         (self._task_kind != 'single_item' and not self._stop_after_current.is_set()))))
             button.configure(text=self._queue_action_text(item.status),
                              command=lambda selected=item: self._convert_single_queue_item(selected),
-                             state='disabled' if self._running else 'normal',
-                             cursor='arrow' if self._running else 'hand2')
+                             state='disabled' if disabled else 'normal',
+                             cursor='arrow' if disabled else 'hand2')
             button.place(x=x+self.u(3), y=y+self.u(2), width=w-self.u(6), height=h-self.u(4))
+            move_box = self.queue_tree.bbox(str(item.source), 'move')
+            position = self._batch_queue.index(item)
+            for n, (move_button, offset, label) in enumerate(zip(self._queue_move_buttons[index], (-1, 1), ('▲', '▼'))):
+                disabled = self._running or not 0 <= position + offset < len(self._batch_queue)
+                move_button._queue_command = lambda selected=item, delta=offset: self._move_queue_item(selected, delta)
+                move_button.configure(text=label, state='disabled' if disabled else 'normal',
+                                      foreground=C['muted'] if disabled else C['action'],
+                                      background=C['tint'] if str(item.source) in self.queue_tree.selection() else C['surface'],
+                                      cursor='arrow' if disabled else 'hand2')
+                if move_box:
+                    mx, my, mw, mh = move_box
+                    half = (mh - 2) // 2
+                    move_button.place(x=mx+1, y=my+1+n*half, width=mw-2, height=half)
+                else: move_button.place_forget()
 
     def _sort_queue(self, _event=None):
         if self._running:
             return
         self._hide_queue_tooltip()
-        self._batch_queue = sort_batch_queue(self._batch_queue, QUEUE_SORTS[self.queue_sort.get()])
-        for index, item in enumerate(self._batch_queue):
-            self.queue_tree.move(str(item.source), '', index)
-        self._failed_queue = [item for item in self._batch_queue if item.status == '失败']
-        self.hint_var.set('已按所选方式排序，转换将按队列顺序执行；输出文件名保持不变。')
-        self._schedule_queue_actions()
+        items = sort_batch_queue(self._batch_queue, QUEUE_SORTS[self.queue_sort.get()])
+        try:
+            self._renumber_queue(items)
+        except ValueError as exc:
+            self._show_error(str(exc)); return
+        self._batch_queue = items
+        self._render_batch_queue()
+        self.hint_var.set('已按所选方式排序，自动输出编号已同步更新；手动文件名保留。')
 
     @staticmethod
     def _queue_action_text(status):
-        return {'转换中': '转换中…', '已完成': '再次转换 ↻', '失败': '重试转换 ↻'}.get(status, '单独转换 ▶')
+        return {'转换中': '转换中…', '排队中': '排队中…', '已完成': '再次转换 ↻', '失败': '重试转换 ↻'}.get(status, '单独转换 ▶')
 
     @staticmethod
     def _queue_status_tag(status):
@@ -751,7 +957,7 @@ class DesktopUI:
     def _apply_queue_naming(self):
         """Prefix/number edits intentionally rename every queued output."""
         self._update_name_preview()
-        if self.mode.get() != 'batch' or not self._batch_queue:
+        if self._running or self.mode.get() != 'batch' or not self._batch_queue:
             return
         try:
             start = int(self.start_number.get() or '0')
@@ -764,7 +970,7 @@ class DesktopUI:
                 item.status, item.error = '等待转换', ''
             item.output_name = name
             item.custom_name = False
-        self._refresh_batch_queue()
+        self._render_batch_queue()
 
     def _edit_queue_name(self, event):
         self._hide_queue_tooltip()
@@ -885,20 +1091,41 @@ class DesktopUI:
             self._queue_hover_anim_id = None
 
     def _convert_single_queue_item(self, item):
-        if self._notice_pending or self._running or self.mode.get() != 'batch':
+        if self._notice_pending or self.mode.get() != 'batch' or item not in self._batch_queue:
+            return
+        if item is self._single_active or item.status in ('转换中', '排队中') or (self._running and
+                (str(item.source) == self._active_batch_source or
+                 (self._task_kind != 'single_item' and not self._stop_after_current.is_set()))):
             return
         try:
             job = validate_form(dict(mode='batch', ref=self.ref_path.get(), inp=self.input_path.get(), out=self.output_path.get(),
                                      crf=self.crf.get(), max_bitrate=self.max_bitrate.get(), prefix=self.prefix.get(),
                                      start_number=self.start_number.get(),
-                                     acceleration=MODES.get(self.acceleration.get(), '')))
+                                     acceleration=MODES.get(self.acceleration.get(), '')), queue_items=self._batch_queue)
             validate_queue_names(self._batch_queue)
             out_path = Path(job.out) / item.output_name
+            if not item.source.is_file():
+                raise ValueError(f'输入视频已不存在：{item.source}')
+            self._validate_queue_destinations(job, [item])
             if out_path.exists() and not messagebox.askyesno('确认覆盖', f'{item.output_name} 已存在。是否覆盖？', parent=self):
                 return
             Path(job.out).mkdir(parents=True, exist_ok=True)
         except (ValueError, OSError) as exc:
             self._show_error(str(exc)); return
+        if self._running:
+            previous_status, previous_error = item.status, item.error
+            item.status, item.error = '排队中', ''
+            self._single_pending.append((item, job, previous_status, previous_error))
+            self._update_queue_row(item)
+            self._set_running(True)
+            self.hint_var.set(f'已加入排队：{item.output_name}，还有 {len(self._single_pending)} 个视频等待转换。')
+            return
+        self._stop_after_current.clear()
+        self._start_single_queue_item(item, job)
+
+    def _start_single_queue_item(self, item, job):
+        self._single_active = item
+        self._active_batch_source = str(item.source)
         self._had_error = False; self._task_kind = 'single_item'; self._open_dir = None
         self._skipped_count = 0
         item.status, item.error = '转换中', ''
@@ -910,6 +1137,18 @@ class DesktopUI:
             args=('batch', job.ref, job.inp, job.out, job.start_number, job.crf, job.max_bitrate, job.prefix,
                   job.acceleration, [(str(item.source), item.output_name)]), daemon=True)
         self.worker_thread.start()
+
+    def _validate_queue_destinations(self, job, items):
+        protected = {entry.source.resolve() for entry in self._batch_queue}
+        protected.add(Path(job.ref).resolve())
+        outputs = {(Path(job.out) / entry.output_name).resolve() for entry in self._batch_queue}
+        for item in items:
+            output = (Path(job.out) / item.output_name).resolve()
+            temporary = output.with_suffix('.reencoded_tmp.mp4')
+            if output in protected or temporary in protected:
+                raise ValueError('输出文件或临时文件不能覆盖参考视频或队列中的原视频。')
+            if temporary in outputs:
+                raise ValueError('输出文件名与其他视频的临时文件名冲突，请修改文件名。')
 
     def _queue_snapshot(self, items=None):
         return [(str(item.source), item.output_name) for item in (items if items is not None else self._batch_queue)]
@@ -948,14 +1187,42 @@ class DesktopUI:
         for w in self._controls:w.config(state='disabled' if running else 'normal')
         self.acceleration_box.config(state='disabled' if running else 'readonly')
         self.queue_sort_box.config(state='disabled' if running else 'readonly')
-        self.start_btn.config(state='disabled' if running else 'normal',text='正在处理…' if running else '开始转换  →')
+        can_stop = running and self._task_kind != 'install' and (not self._stop_after_current.is_set() or bool(self._single_pending))
+        label = ('完成当前后停止' if can_stop else '正在处理…') if running else '开始转换  →'
+        if running and self._stop_after_current.is_set() and not self._single_pending: label = '当前完成后停止…'
+        self.start_btn.config(state='normal' if not running or can_stop else 'disabled', text=label)
         self.install_btn.config(state='disabled' if running else 'normal')
         self.open_btn.config(state='normal' if not running and self._open_dir else 'disabled')
         self.retry_btn.config(state='disabled' if running else ('normal' if self._failed_queue else 'disabled'))
         self._schedule_queue_actions()
 
+    def _start_or_cancel(self):
+        if self._running:
+            self._cancel_tasks()
+        else:
+            self._start()
+
+    def _cancel_tasks(self):
+        if not self._running or self._task_kind == 'install': return
+        with self._dispatch_lock:
+            self._stop_after_current.set()
+            active_source = self._active_batch_source
+        for item, _job, status, error in self._single_pending:
+            item.status, item.error = status, error
+            self._update_queue_row(item)
+        self._single_pending.clear()
+        for item, status, error in self._bulk_pending_states:
+            if str(item.source) != active_source and item.status in ('等待转换', '等待重试'):
+                item.status, item.error = status, error
+                self._update_queue_row(item)
+        self._failed_queue = [item for item in self._batch_queue if item.status == '失败']
+        self._set_running(True)
+        self.hint_var.set('已取消所有等待任务；可继续点击其他视频重新排队，当前视频会完整转换。')
+        self._log('用户取消等待任务：保留当前视频完整输出，不再启动后续任务。')
+
     def _install_ffmpeg(self):
         if self._notice_pending or self._running:return
+        self._stop_after_current.clear()
         self._task_kind='install';self._had_error=False;self._set_running(True)
         self.progress_label.config(text='准备转换环境');self.hint_label.config(foreground=C['muted'])
         self.install_thread=threading.Thread(target=self._install_worker,daemon=True);self.install_thread.start()
@@ -972,7 +1239,9 @@ class DesktopUI:
         skipped_items = []
         queue_items = None
         try:
-            job=validate_form(dict(mode=self.mode.get(),ref=self.ref_path.get(),inp=self.input_path.get(),out=self.output_path.get(),crf=self.crf.get(),max_bitrate=self.max_bitrate.get(),prefix=self.prefix.get(),start_number=self.start_number.get(),acceleration=MODES.get(self.acceleration.get(),'')))
+            if self.mode.get() == 'batch' and not self._batch_queue: self._refresh_batch_queue()
+            job=validate_form(dict(mode=self.mode.get(),ref=self.ref_path.get(),inp=self.input_path.get(),out=self.output_path.get(),crf=self.crf.get(),max_bitrate=self.max_bitrate.get(),prefix=self.prefix.get(),start_number=self.start_number.get(),acceleration=MODES.get(self.acceleration.get(),'')),
+                              queue_items=self._batch_queue if self.mode.get() == 'batch' else None)
             if job.mode=='batch':
                 if not self._batch_queue: self._refresh_batch_queue()
                 if not self._batch_queue:raise ValueError('输入文件夹中没有支持的视频。')
@@ -986,13 +1255,16 @@ class DesktopUI:
                     return
                 if job.start_number+len(self._batch_queue)-1>9999:raise ValueError('批量编号将超过 9999，请调低起始编号。')
                 conflicts=[Path(job.out)/item.output_name for item in pending_items]
-                if Path(job.ref).resolve() in [p.resolve() for p in conflicts]:raise ValueError('批量输出不能覆盖参考视频。')
+                self._validate_queue_destinations(job, pending_items)
                 overwrite=any(p.exists() for p in conflicts)
             else:overwrite=Path(job.out).exists()
             if overwrite and not messagebox.askyesno('确认覆盖','输出位置已有同名文件。是否覆盖？',parent=self):return
             (Path(job.out).parent if job.mode=='single' else Path(job.out)).mkdir(parents=True,exist_ok=True)
         except (ValueError,OSError) as exc:self._show_error(str(exc));return
         self._had_error=False;self._task_kind='conversion';self._open_dir=None;self._failed_queue=[]
+        self._stop_after_current.clear()
+        self._bulk_pending_states = [(item, item.status, item.error) for item in pending_items] if job.mode == 'batch' else []
+        self._active_batch_source = str(pending_items[0].source) if job.mode == 'batch' else None
         self._skipped_count = len(skipped_items)
         if self._skipped_count:
             self._log(f'自动跳过 {self._skipped_count} 个已完成且输出文件存在的视频。')
@@ -1009,16 +1281,21 @@ class DesktopUI:
     def _retry_failed(self):
         if self._notice_pending or self._running or not self._failed_queue: return
         try:
-            job = validate_form(dict(mode='batch', ref=self.ref_path.get(), inp=self.input_path.get(), out=self.output_path.get(), crf=self.crf.get(), max_bitrate=self.max_bitrate.get(), prefix=self.prefix.get(), start_number=self.start_number.get(), acceleration=MODES.get(self.acceleration.get(), '')))
+            job = validate_form(dict(mode='batch', ref=self.ref_path.get(), inp=self.input_path.get(), out=self.output_path.get(), crf=self.crf.get(), max_bitrate=self.max_bitrate.get(), prefix=self.prefix.get(), start_number=self.start_number.get(), acceleration=MODES.get(self.acceleration.get(), '')),
+                                queue_items=self._batch_queue)
             validate_queue_names(self._failed_queue)
+            self._validate_queue_destinations(job, self._failed_queue)
         except (ValueError, OSError) as exc:
             self._show_error(str(exc)); return
         self._had_error = False; self._task_kind = 'retry'; self._open_dir = None
+        self._stop_after_current.clear()
         self._skipped_count = 0
         self.progress['value'] = 0; self.progress_label.config(text='正在重试失败视频')
         self.hint_var.set('正在重试失败项目，输出名称沿用队列设置。')
         self._log('\n— 重试失败视频 —'); self._set_running(True)
         items = list(self._failed_queue)
+        self._bulk_pending_states = [(item, item.status, item.error) for item in items]
+        self._active_batch_source = str(items[0].source)
         for item in items:
             item.status, item.error = '等待重试', ''
             self._update_queue_row(item)
@@ -1085,9 +1362,27 @@ class DesktopUI:
                         self._update_queue_row(item)
                 elif kind=='error':self._show_error(payload)
                 elif kind=='done':
+                    if self._task_kind == 'single_item':
+                        active = self._single_active
+                        if active is not None and active.status == '转换中':
+                            active.status, active.error = '失败', '转换未正常完成，请查看日志。'
+                            if active not in self._failed_queue: self._failed_queue.append(active)
+                            self._update_queue_row(active)
+                        self._single_active = None
+                    if self._single_pending:
+                        item, job, _previous_status, _previous_error = self._single_pending.pop(0)
+                        self._stop_after_current.clear()
+                        self._bulk_pending_states = []
+                        self._start_single_queue_item(item, job)
+                        continue
                     self._set_running(False)
+                    self._bulk_pending_states = []
+                    self._active_batch_source = None
                     self.retry_btn.config(state='normal' if self._failed_queue else 'disabled')
-                    if self._had_error or self._failed_queue:
+                    if self._stop_after_current.is_set() and self._task_kind != 'install':
+                        self.progress_label.config(text='已停止 · 等待任务已取消')
+                        self.hint_var.set('当前任务已结束，后续任务未执行；可重新选择视频转换。')
+                    elif self._had_error or self._failed_queue:
                         self.progress_label.config(text='处理结束 · 可重试失败视频')
                         if self._skipped_count:
                             self.hint_var.set(f'处理结束，自动跳过 {self._skipped_count} 个已完成视频；失败视频可点击“重试失败视频”。')
