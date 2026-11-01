@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from fractions import Fraction
+import math
 from pathlib import Path
 import re
 
@@ -35,6 +37,23 @@ def build_batch_queue(videos, prefix='DJI_', start_number=0):
     ]
 
 
+def sort_batch_queue(items, order='name_asc'):
+    """Reorder existing items without changing names or conversion state."""
+    reverse = order.endswith('_desc')
+    if order.startswith('name_'):
+        return sorted(items, key=lambda item: natural_sort_key(item.source), reverse=reverse)
+    dated, missing = [], []
+    for item in items:
+        try:
+            stat = item.source.stat()
+            timestamp = stat.st_ctime if order.startswith('created_') else stat.st_mtime
+            dated.append((timestamp, natural_sort_key(item.source), item))
+        except OSError:
+            missing.append(item)
+    dated.sort(key=lambda entry: (entry[0], entry[1]), reverse=reverse)
+    return [entry[2] for entry in dated] + sorted(missing, key=lambda item: natural_sort_key(item.source))
+
+
 def validate_queue_names(items):
     """Validate user-edited output names before a batch starts."""
     invalid = re.compile(r'[<>:"/\\|?*]')
@@ -61,6 +80,68 @@ def pending_batch_items(items, output_dir):
     skipped_sources = {str(item.source) for item in skipped}
     pending = [item for item in items if str(item.source) not in skipped_sources]
     return pending, skipped
+
+
+def estimate_remaining_seconds(total_duration, processed_duration, speed):
+    """Estimate wall-clock time from remaining media duration and FFmpeg speed."""
+    try:
+        total = float(total_duration)
+        processed = float(processed_duration)
+        multiplier = float(speed)
+    except (TypeError, ValueError):
+        return None
+    if total < 0 or processed < 0 or multiplier <= 0:
+        return None
+    return max(0.0, total - processed) / multiplier
+
+
+def format_eta(seconds):
+    if seconds is None:
+        return '预计剩余计算中'
+    try:
+        remaining = max(0, math.ceil(float(seconds)))
+    except (TypeError, ValueError):
+        return '预计剩余计算中'
+    minutes, seconds = divmod(remaining, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f'预计剩余 {hours:02d}:{minutes:02d}:{seconds:02d}'
+    return f'预计剩余 {minutes:02d}:{seconds:02d}'
+
+
+def format_reference_specs(info):
+    """Format the video and audio parameters read from a reference MP4."""
+    streams = info.get('streams', [])
+    video = next((stream for stream in streams if stream.get('codec_type') == 'video'), None)
+    if video is None:
+        return '未检测到视频轨道'
+
+    width, height = video.get('width'), video.get('height')
+    resolution = f'{width}×{height}' if width and height else '未知分辨率'
+    rate = video.get('avg_frame_rate') or video.get('r_frame_rate')
+    try:
+        fps = float(Fraction(str(rate)))
+        fps_label = f'{fps:.2f}'.rstrip('0').rstrip('.') if fps > 0 else '未知'
+    except (ValueError, ZeroDivisionError, TypeError):
+        fps_label = '未知'
+
+    video_codec = str(video.get('codec_name') or '未知视频编码').lower()
+    video_codec = {'h264': 'H.264', 'hevc': 'H.265/HEVC'}.get(video_codec, video_codec.upper())
+    parts = [resolution, f'{fps_label} fps', video_codec]
+
+    audio = next((stream for stream in streams if stream.get('codec_type') == 'audio'), None)
+    if audio is None:
+        parts.append('无音轨')
+    else:
+        audio_codec = str(audio.get('codec_name') or '未知音频编码').upper()
+        try:
+            sample_rate = int(audio.get('sample_rate') or 0)
+            rate_label = f'{sample_rate // 1000} kHz' if sample_rate >= 1000 and sample_rate % 1000 == 0 else f'{sample_rate} Hz'
+        except (ValueError, TypeError):
+            rate_label = '采样率未知'
+        channels = audio.get('channels') or '未知'
+        parts.append(f'{audio_codec} {rate_label} / {channels} ch')
+    return ' · '.join(parts)
 
 def validate_form(values):
     v = {k: str(x).strip() for k, x in values.items()}

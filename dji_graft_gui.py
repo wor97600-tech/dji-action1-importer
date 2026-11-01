@@ -18,6 +18,7 @@ from dji_graft import (
     transcode,
     graft,
     get_input_video_bitrate,
+    get_duration_seconds,
 )
 from ffmpeg_env import ensure_ffmpeg, find_ffmpeg, ffmpeg_version
 from utils import find_input_videos
@@ -117,6 +118,10 @@ class App(DesktopUI, tk.Tk):
             tmp_path,
             targets,
             progress_callback=lambda p: self.msg_queue.put(("progress", (inp.name, p))),
+            progress_details_callback=lambda details: self.msg_queue.put((
+                'progress_details',
+                (inp.name, details, 1, 1, details.get('duration_seconds')),
+            )),
             crf=crf,
             max_video_bitrate=max_br,
             acceleration=acceleration,
@@ -147,8 +152,14 @@ class App(DesktopUI, tk.Tk):
             return
 
         self.msg_queue.put(
-            ("log", f"共发现 {len(videos)} 个文件（已按文件名自然排序），从编号 {start_num} 开始命名")
+            ("log", f"共发现 {len(videos)} 个文件，按当前队列顺序转换，使用队列中的输出文件名")
         )
+        durations = []
+        for video in videos:
+            try:
+                durations.append(max(0.0, float(get_duration_seconds(video))))
+            except (OSError, RuntimeError, TypeError, ValueError):
+                durations.append(0.0)
         ok_count, fail_count = 0, 0
 
         for idx, (video, out_name) in enumerate(entries, 1):
@@ -156,6 +167,11 @@ class App(DesktopUI, tk.Tk):
             tmp_path = out_path.with_suffix(".reencoded_tmp.mp4")
             self.msg_queue.put(("log", f"\n[{idx}/{len(videos)}] {video.name} -> {out_name}"))
             self.msg_queue.put(('queue_status', (str(video), '转换中', '')))
+            current_duration = durations[idx - 1]
+            remaining_durations = durations[idx - 1:]
+            remaining_duration = (sum(remaining_durations)
+                                  if all(duration > 0 for duration in remaining_durations)
+                                  else None)
             try:
                 transcode(
                     video,
@@ -164,6 +180,10 @@ class App(DesktopUI, tk.Tk):
                     progress_callback=lambda p, n=video.name, i=idx, t=len(videos): (
                         self.msg_queue.put(("progress", (n, p, i, t)))
                     ),
+                    progress_details_callback=lambda details, n=video.name, i=idx, t=len(videos), r=remaining_duration: (
+                        self.msg_queue.put(("progress_details", (n, details, i, t, r)))
+                    ),
+                    total_duration=current_duration if current_duration > 0 else None,
                     crf=crf,
                     max_video_bitrate=max_br,
                     acceleration=acceleration,
@@ -200,7 +220,7 @@ def main():
     if sys.platform == "win32":
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DJIGraft.Desktop.5.1")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DJIGraft.Desktop.5.2")
         except (OSError, AttributeError):
             pass
     app = App()

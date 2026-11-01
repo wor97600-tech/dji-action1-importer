@@ -104,7 +104,25 @@ def _parse_time_str(s):
         return None
 
 
-def run_ffmpeg_with_progress(cmd, total_duration, label="", progress_callback=None):
+def parse_ffmpeg_progress(values, total_duration):
+    out_time = _parse_time_str(values.get('out_time', ''))
+    duration = max(0.0, float(total_duration or 0))
+    percent = (out_time / duration * 100) if out_time is not None and duration > 0 else 0.0
+    try:
+        speed_value = str(values.get('speed', '')).strip()
+        speed = float(speed_value[:-1]) if speed_value.endswith('x') else None
+    except (TypeError, ValueError):
+        speed = None
+    return {
+        'out_time_seconds': out_time,
+        'speed': speed,
+        'percent': max(0.0, min(100.0, percent)),
+        'duration_seconds': duration,
+    }
+
+
+def run_ffmpeg_with_progress(cmd, total_duration, label="", progress_callback=None,
+                             progress_details_callback=None):
     cmd = cmd[:-1] + ["-progress", "pipe:1", "-nostats"] + [cmd[-1]]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, encoding="utf-8", errors="replace", bufsize=1, **hidden_process_options())
@@ -117,45 +135,67 @@ def run_ffmpeg_with_progress(cmd, total_duration, label="", progress_callback=No
     t = threading.Thread(target=_drain_stderr, daemon=True)
     t.start()
 
+    progress_values = {}
     for line in proc.stdout:
         line = line.strip()
+        if '=' in line:
+            key, value = line.split('=', 1)
+            if key == 'progress':
+                details = parse_ffmpeg_progress(progress_values, total_duration)
+                if value == 'end':
+                    details['percent'] = 100.0
+                if progress_details_callback:
+                    progress_details_callback(details)
+                if value == 'end':
+                    if progress_callback:
+                        progress_callback(100.0)
+                    else:
+                        bar = format_bar(100)
+                        if not progress_details_callback:
+                            print(f"\r    {label} {bar}", flush=True)
+                progress_values = {}
+            else:
+                progress_values[key] = value
         if line.startswith("out_time="):
             secs = _parse_time_str(line.split("=", 1)[1])
             if secs is not None:
                 percent = (secs / total_duration * 100) if total_duration > 0 else 0
                 if progress_callback:
                     progress_callback(min(100.0, percent))
-                else:
+                elif not progress_details_callback:
                     bar = format_bar(percent) if total_duration > 0 else f"{secs:6.1f}s"
                     print(f"\r    {label} {bar}", end="", flush=True)
-        elif line.startswith("progress=") and line.endswith("end"):
-            if progress_callback:
-                progress_callback(100.0)
-            else:
-                print(f"\r    {label} {format_bar(100)}", flush=True)
 
     proc.wait()
     t.join(timeout=5)
     if proc.returncode != 0:
-        if not progress_callback:
+        if not progress_callback and not progress_details_callback:
             print()
         raise RuntimeError(f"ffmpeg 失败:\n{''.join(stderr_chunks)[-3000:]}")
 
 
 def transcode(input_path, out_path, targets, show_progress=True, label="",
               progress_callback=None, crf=None, max_video_bitrate=None,
-              acceleration='cpu', status_callback=None):
+              acceleration='cpu', status_callback=None,
+              progress_details_callback=None, total_duration=None):
     """
     crf: 0-51，越小画质越好体积越大。推荐 23（默认）或 26（更小体积）。
          None 表示使用固定码率（兼容旧行为）。
     max_video_bitrate: 手动限制峰值码率（bps），覆盖参考文件码率。
     """
+    needs_duration = (progress_callback is not None or progress_details_callback is not None
+                      or show_progress)
+    if total_duration is None and needs_duration:
+        total_duration = get_duration_seconds(input_path)
+    elif total_duration is None:
+        total_duration = 0.0
+
     if acceleration != 'cpu':
         from hardware_accel import try_hardware
         status = status_callback or (lambda message: print(message, flush=True))
-        duration = get_duration_seconds(input_path) if progress_callback is not None or show_progress else 0
         if try_hardware(input_path, out_path, targets, FFMPEG_BIN, FFPROBE_BIN, acceleration,
-                        max_video_bitrate, duration, label, progress_callback, show_progress, status):
+                        max_video_bitrate, total_duration, label, progress_callback,
+                        show_progress, status, progress_details_callback):
             return
     ab = max(targets["audio_bitrate"], 128_000)
     
@@ -199,10 +239,13 @@ def transcode(input_path, out_path, targets, show_progress=True, label="",
     ]
 
     if progress_callback is not None:
-        total_duration = get_duration_seconds(input_path)
-        run_ffmpeg_with_progress(cmd, total_duration, label=label, progress_callback=progress_callback)
+        run_ffmpeg_with_progress(cmd, total_duration, label=label,
+                                 progress_callback=progress_callback,
+                                 progress_details_callback=progress_details_callback)
+    elif progress_details_callback is not None:
+        run_ffmpeg_with_progress(cmd, total_duration, label=label,
+                                 progress_details_callback=progress_details_callback)
     elif show_progress:
-        total_duration = get_duration_seconds(input_path)
         run_ffmpeg_with_progress(cmd, total_duration, label=label)
     else:
         r = run(cmd)

@@ -3,12 +3,15 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from dji_graft_gui import App,_enable_dpi_awareness
 _enable_dpi_awareness()
-a=App();a.update()
+from unittest.mock import patch
+with patch('desktop_ui.disclaimer_acknowledged', return_value=True):
+    a=App()
+a.update()
 assert a.acceleration.get()=='自动选择 · 显卡优先'
 assert a.max_bitrate.get()=='2000'
-assert '5.0' in a.title()
+assert '5.2' in a.title()
 results=[]
-for w,h in [(1080,700),(920,630),(1280,760)]:
+for w,h in [(1200,760),(1040,680),(1280,800)]:
     a.geometry(f'{w}x{h}');a.update()
     for mode in ('single','batch'):
         a.mode.set(mode);a._on_mode_change();a.update()

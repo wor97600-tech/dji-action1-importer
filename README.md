@@ -2,7 +2,7 @@
 
 > 把手机、运动相机、屏幕录像等第三方视频，转码并“移植”进 DJI Action 系列相机的原生 MP4 容器结构，让相机能像播放自己拍摄的文件一样正常回放。
 
-**Windows 正式版：v5.1** · Android 手机版：v4.0.0（本次不更新）
+**Windows 正式版：v5.2** · Android 手机版：v4.0.0（本次不更新）
 
 [下载 Windows 版](#windows-桌面版) · [下载 Android 版](#android-手机版) · [查看 Releases](../../releases)
 
@@ -22,14 +22,14 @@
 
 ## 下载
 
-Windows v5.1 已独立发布；Android 继续使用 v4.0.0，本次不发布 APK。
+Windows v5.2 已独立发布；Android 继续使用 v4.0.0，本次不发布 APK。
 
 | 平台 | 文件 | 体积 | 说明 |
 |---|---|---|---|
-| Windows 10/11 x64 | [DJIGraft-5.1-Windows-x64.exe](../../releases/download/v5.1/DJIGraft-5.1-Windows-x64.exe) | 约 12.5 MB | 不内置 FFmpeg，可使用已有环境 |
+| Windows 10/11 x64 | [DJIGraft-5.2-Windows-x64.exe](../../releases/download/v5.2/DJIGraft-5.2-Windows-x64.exe) | 约 12.5 MB | 不内置 FFmpeg，可使用已有环境 |
 | Android 8.0+ | `DJIGraft-Android-v4.0.0.apk` | 约 111 MB | 已内置 FFmpeg，离线可用 |
 
-前往 [Windows v5.1](../../releases/tag/v5.1) 或 [Android v4.0.0](../../releases/tag/v4.0.0) 下载对应版本。Windows 校验值见 v5.1 附件 `SHA256SUMS.txt`。
+前往 [Windows v5.2](../../releases/tag/v5.2) 或 [Android v4.0.0](../../releases/tag/v4.0.0) 下载对应版本。Windows 校验值见 v5.2 附件 `SHA256SUMS.txt`。
 
 - Android：`2FBF4D5AB739902E046046F6F878DAD656A35F2EA36BB93C330C561E4EC228C4`
 
@@ -37,7 +37,19 @@ Windows v5.1 已独立发布；Android 继续使用 v4.0.0，本次不发布 APK
 
 ## Windows 桌面版
 
-### v5.1 更新亮点
+### v5.2 更新亮点
+
+- **实时转换信息**：新增转换速度和预计剩余时间；批量任务结合当前及后续视频时长估算剩余转码时间。
+- **深色模式**：新增深色模式切换，自动记住选择，覆盖主界面、队列、日志和弹窗。
+- **批量排序**：新增名称、修改时间、创建时间的升序／降序选择；转换按队列顺序执行，切换排序保留输出名称和任务状态。
+- **更清楚的队列操作**：单项转换操作改为有底色、边框和悬停反馈的按钮；扩大队列显示区域，长输出名支持悬停查看完整内容。
+- **参考视频规格**：选择参考文件后显示分辨率、帧率、视频编码及音频参数；新增问号说明，提示使用相机拍摄、未经剪辑或二次转码的原生视频。未选择时隐藏规格说明。
+- **界面与动画优化**：三行路径框及选择按钮统一对齐；优化胶囊按钮曲线和文字居中，按钮、队列悬停采用柔和过渡。
+- **首次使用声明**：首次启动显示居中免责声明，确认后记住；弹窗期间背景变暗、后方窗口不可操作，关闭后逐层恢复。
+- **关于与赞助**：右上角新增“关于我们”入口，独立窗口包含联系方式、一键复制、免责声明、鸢尾鸟赞助致谢，以及微信／支付宝赞助收款码和原图入口。
+
+
+### 已有桌面功能
 
 - **全新扁平界面**：左侧文件与批量命名，右侧编码设置和日志；开始转换固定在底部。修复批量模式画质和码率说明被裁切的问题。
 - **默认显卡加速**：自动检测 NVIDIA NVENC → Intel Quick Sync → AMD AMF；检测、编码或校验失败时尝试后续编码器，全部失败回退 CPU。也可手动选择编码器。
@@ -54,7 +66,7 @@ Windows v5.1 已独立发布；Android 继续使用 v4.0.0，本次不发布 APK
 
 ### 直接运行
 
-1. 下载 [DJIGraft-5.1-Windows-x64.exe](../../releases/download/v5.1/DJIGraft-5.1-Windows-x64.exe)；
+1. 下载 [DJIGraft-5.2-Windows-x64.exe](../../releases/download/v5.2/DJIGraft-5.2-Windows-x64.exe)；
 2. 双击运行，不需要单独安装 Python；
 3. 首次转换时如果系统里没有 FFmpeg，程序会提示并自动下载，
    之后缓存在 `%LOCALAPPDATA%\DJIGraft\bin`；
@@ -147,7 +159,7 @@ python dji_graft.py --ref 参考原生文件.MP4 --input 输入视频.mp4 --outp
 .\build.ps1
 ```
 
-输出文件在 `dist\DJIGraft-5.1-Windows-x64.exe`。生成的 exe 默认不内置 FFmpeg，
+输出文件在 `dist\DJIGraft-5.2-Windows-x64.exe`。生成的 exe 默认不内置 FFmpeg，
 首次使用时会自动下载，因此安装包体积很小。
 
 ### Android APK
@@ -165,7 +177,7 @@ APK 输出在 `android/app/build/outputs/apk/debug/app-debug.apk`。
 
 ### 发布 Windows 正式版
 
-推送 `v5.1` 标签触发 Windows 发布流程：运行自动测试、构建轻量 EXE、生成 SHA-256 校验文件，并使用 `docs/releases/v5.1.md` 发布说明。此流程不构建、不上传 Android APK，手机端保留 v4.0.0。
+推送 `v5.2` 标签触发 Windows 发布流程：运行自动测试、构建轻量 EXE、生成 SHA-256 校验文件，并使用 `docs/releases/v5.2.md` 发布说明。此流程不构建、不上传 Android APK，手机端保留 v4.0.0。
 
 ### 桌面测试
 

@@ -24,19 +24,34 @@ class BatchQueueExecutionTests(unittest.TestCase):
 
             def fake_transcode(source, tmp, targets, **kwargs):
                 tmp.write_bytes(source.read_bytes())
+                kwargs['progress_details_callback']({
+                    'out_time_seconds': 2,
+                    'speed': 1.0,
+                    'percent': 20,
+                    'duration_seconds': kwargs['total_duration'],
+                })
 
             def fake_graft(ref, tmp, dest):
                 dest.write_bytes(tmp.read_bytes())
 
-            with patch('dji_graft_gui.transcode', fake_transcode), patch('dji_graft_gui.graft', fake_graft):
+            with patch('dji_graft_gui.get_duration_seconds', side_effect=[10, 20]), \
+                 patch('dji_graft_gui.transcode', fake_transcode), \
+                 patch('dji_graft_gui.graft', fake_graft):
                 App._run_batch(ui, root / 'reference.mp4', inputs, output, {}, 900, 23, None, 'DJI_', 'cpu', [
                     (str(second), 'custom.MP4'), (str(first), 'DJI_0900.MP4')
                 ])
 
             self.assertTrue((output / 'custom.MP4').is_file())
             self.assertTrue((output / 'DJI_0900.MP4').is_file())
-            statuses = [payload for kind, payload in iter_queue(messages) if kind == 'queue_status']
+            recorded = list(iter_queue(messages))
+            statuses = [payload for kind, payload in recorded if kind == 'queue_status']
             self.assertEqual([status for _, status, _ in statuses], ['转换中', '已完成', '转换中', '已完成'])
+            detail_messages = [
+                payload for kind, payload in recorded if kind == 'progress_details'
+            ]
+            self.assertEqual([payload[2] for payload in detail_messages], [1, 2])
+            self.assertEqual([payload[1]['duration_seconds'] for payload in detail_messages], [10, 20])
+            self.assertEqual([payload[4] for payload in detail_messages], [30, 20])
 
 
 def iter_queue(messages):

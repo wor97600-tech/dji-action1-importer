@@ -18,12 +18,19 @@ from tkinter import font as tkfont
 from tkinter import ttk, filedialog, messagebox
 
 from ffmpeg_env import ensure_ffmpeg, find_ffmpeg, ffmpeg_version
-from dji_graft import configure_ffmpeg
+from dji_graft import configure_ffmpeg, ffprobe_json
 from utils import find_input_videos
-from ui_model import validate_form, build_batch_queue, validate_queue_names, pending_batch_items
-from ui_theme import COLORS as C, FONT
+from app_info import disclaimer_acknowledged, show_disclaimer, show_about
+from ui_model import (validate_form, build_batch_queue, validate_queue_names,
+                      pending_batch_items, format_reference_specs,
+                      estimate_remaining_seconds, format_eta, sort_batch_queue)
+from ui_theme import (COLORS as C, FONT, colors_for, load_theme_preference,
+                      save_theme_preference)
 
-VERSION = 'v5.1'
+VERSION = 'v5.2'
+QUEUE_SORTS = {'名称 · 升序': 'name_asc', '名称 · 降序': 'name_desc',
+               '修改时间 · 最早优先': 'modified_asc', '修改时间 · 最新优先': 'modified_desc',
+               '创建时间 · 最早优先': 'created_asc', '创建时间 · 最新优先': 'created_desc'}
 MODES = {'CPU · 原版': 'cpu', '自动选择 · 显卡优先': 'auto',
          'NVIDIA NVENC': 'h264_nvenc', 'Intel Quick Sync': 'h264_qsv', 'AMD AMF': 'h264_amf'}
 
@@ -51,10 +58,11 @@ class RoundedActionButton(tk.Canvas):
         height = self._font.metrics('linespace') + 2 * self._pad_y
         super().__init__(parent, width=width, height=height, bg=C['surface'],
                          highlightthickness=0, borderwidth=0, takefocus=1, cursor='hand2')
-        self._shape = self.create_polygon(0, 0, 0, 0, smooth=False, outline='', tags=('button-shape',))
+        self._shape = self.create_polygon(0, 0, 0, 0, smooth=True, splinesteps=12, outline='', tags=('button-shape',))
         self._label = self.create_text(width / 2, height / 2, text=text, font=self._font,
                                        fill=self._normal_fg, tags=('button-label',))
         self._draw_shape(self._normal_bg)
+        self.bind('<Configure>', self._resize_shape, add='+')
         self.bind('<Enter>', lambda _e: self._animate(True), add='+')
         self.bind('<Leave>', lambda _e: self._animate(False), add='+')
         self.bind('<ButtonPress-1>', self._press, add='+')
@@ -63,16 +71,22 @@ class RoundedActionButton(tk.Canvas):
         self.bind('<space>', self._invoke, add='+')
 
     def _draw_shape(self, color):
-        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        w = max(self.winfo_width(), self.winfo_reqwidth())
+        h = max(self.winfo_height(), self.winfo_reqheight())
         r = min(h / 2, w / 2)
         points = []
         for cx, cy, start in ((w-r, r, -90), (w-r, h-r, 0), (r, h-r, 90), (r, r, 180)):
-            for angle in range(start, start + 91, 15):
+            for angle in range(start, start + 91, 5):
                 rad = angle * 3.141592653589793 / 180
                 points.extend((cx + r * math.cos(rad), cy + r * math.sin(rad)))
         self.coords(self._shape, *points)
+        self.coords(self._label, w / 2, h / 2)
         self.itemconfigure(self._shape, fill=color)
         self.tag_raise(self._label)
+
+    def _resize_shape(self, event):
+        if event.width > 1 and event.height > 1:
+            self._draw_shape(self._current_bg)
 
     def _paint(self, bg, fg):
         self._current_bg, self._current_fg = bg, fg
@@ -98,11 +112,12 @@ class RoundedActionButton(tk.Canvas):
             bg = C['text']
             fg = C['surface']
         start_bg, start_fg = self._current_bg, self._current_fg
+        steps = 4 if pressed else 10
         def frame(index=1):
-            amount = index / 3
+            amount = 1 - (1 - index / steps) ** 3
             self._paint(self._mix(start_bg, bg, amount), self._mix(start_fg, fg, amount))
-            if index < 3:
-                self._anim_id = self.after(7, lambda: frame(index + 1))
+            if index < steps:
+                self._anim_id = self.after(16, lambda: frame(index + 1))
             else:
                 self._anim_id = None
         frame()
@@ -132,7 +147,11 @@ class RoundedActionButton(tk.Canvas):
             self.itemconfigure(self._label, text=text)
             width = self._font.measure(text) + 2 * self._pad_x
             self.configure(width=width)
+            self._draw_shape(self._current_bg)
         if state is not None:
+            if self._anim_id:
+                self.after_cancel(self._anim_id)
+                self._anim_id = None
             self._state = state
             if state == 'disabled':
                 self._paint(C['border'], C['secondary'])
@@ -150,6 +169,20 @@ class RoundedActionButton(tk.Canvas):
         if key == 'state': return self._state
         return super().cget(key)
 
+    def apply_theme(self):
+        if self._anim_id:
+            self.after_cancel(self._anim_id)
+            self._anim_id = None
+        self._normal_bg = C['action'] if self._primary else C['tint']
+        self._normal_fg = C['surface'] if self._primary else C['action']
+        self._hover_bg = C['text'] if self._primary else C['hover']
+        self._hover_fg = C['surface']
+        self.configure(bg=C['surface'])
+        if self._state == 'disabled':
+            self._paint(C['border'], C['secondary'])
+        else:
+            self._paint(self._normal_bg, self._normal_fg)
+
 
 class HelpHint(tk.Canvas):
     """Small circular question mark with a hover-only explanatory tooltip."""
@@ -160,9 +193,9 @@ class HelpHint(tk.Canvas):
         size = max(16, round(18 * scale))
         super().__init__(parent, width=size, height=size, bg=C['surface'],
                          highlightthickness=0, borderwidth=0, takefocus=0, cursor='question_arrow')
-        self.create_oval(1, 1, size-1, size-1, fill=C['tint'], outline=C['border'])
-        self.create_text(size/2, size/2, text='?', fill=C['action'],
-                         font=(FONT, -round(11*scale), 'bold'))
+        self._circle = self.create_oval(1, 1, size-1, size-1, fill=C['tint'], outline=C['border'])
+        self._label = self.create_text(size/2, size/2, text='?', fill=C['action'],
+                                       font=(FONT, -round(11*scale), 'bold'))
         self.bind('<Enter>', self._show, add='+')
         self.bind('<Leave>', self._hide, add='+')
         self._tooltip = None
@@ -178,6 +211,12 @@ class HelpHint(tk.Canvas):
         label.pack()
         tip.geometry(f'+{event.x_root+12}+{event.y_root+14}')
 
+    def apply_theme(self):
+        self.configure(bg=C['surface'])
+        self.itemconfigure(self._circle, fill=C['tint'], outline=C['border'])
+        self.itemconfigure(self._label, fill=C['action'])
+        self._hide()
+
     def _hide(self, _event=None):
         if self._tooltip is not None:
             try: self._tooltip.destroy()
@@ -188,6 +227,9 @@ class HelpHint(tk.Canvas):
 class DesktopUI:
     def __init__(self):
         super().__init__()
+        self._theme_name = load_theme_preference()
+        C.clear(); C.update(colors_for(self._theme_name))
+        self.dark_mode = tk.BooleanVar(value=self._theme_name == 'dark')
         self.title('DJI Graft · 视频导入工具 ' + VERSION)
         self.configure(bg=C['bg'])
         area = (0, 0, self.winfo_screenwidth(), self.winfo_screenheight())
@@ -199,11 +241,11 @@ class DesktopUI:
                     area = (rect.left, rect.top, rect.right, rect.bottom)
             except (OSError, AttributeError): pass
         aw, ah = area[2]-area[0], area[3]-area[1]
-        self.ui_scale = min(1.0, (aw-32)/1080, (ah-56)/700)
+        self.ui_scale = min(1.0, (aw-32)/1200, (ah-56)/760)
         self.u = lambda x: max(1, round(x*self.ui_scale))
-        w, h = self.u(1080), self.u(700)
+        w, h = self.u(1200), self.u(760)
         self.geometry(f'{w}x{h}+{area[0]+max(0,(aw-w)//2)}+{area[1]+max(0,(ah-h)//2)}')
-        self.minsize(self.u(920), self.u(630))
+        self.minsize(self.u(1040), self.u(680))
         self._running = False
         self._had_error = False
         self._task_kind = 'conversion'
@@ -212,10 +254,13 @@ class DesktopUI:
         self._open_dir = None
         self._batch_queue = []
         self._failed_queue = []
+        self._reference_probe_id = 0
+        self._reference_probe_pending = False
         self.worker_thread = self.install_thread = None
         self.msg_queue = queue.Queue()
         self.ref_path = tk.StringVar()
         self.mode = tk.StringVar(value='single')
+        self.queue_sort = tk.StringVar(value='名称 · 升序')
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
         self.prefix = tk.StringVar(value='DJI_')
@@ -229,6 +274,9 @@ class DesktopUI:
         self._set_theme()
         self._set_icon()
         self._build_ui()
+        self._notice_pending = not disclaimer_acknowledged()
+        if self._notice_pending:
+            self.after_idle(lambda: show_disclaimer(self, first_run=True))
         for var in (self.prefix, self.start_number):
             var.trace_add('write',lambda *_: (self._update_name_preview(), self._apply_queue_naming()))
         self.acceleration.trace_add('write', lambda *_: self._update_encoder_hint())
@@ -252,12 +300,36 @@ class DesktopUI:
         style.map('TButton',background=[('disabled',C['bg']),('pressed',C['border']),('active',C['border'])],foreground=[('disabled',C['muted'])],bordercolor=[('disabled',C['border']),('!disabled',C['action'])])
         style.configure('Primary.TButton',background=C['action'],foreground=C['surface'],font=(FONT,-u(16),'bold'),padding=(u(24),u(12)))
         style.map('Primary.TButton',background=[('disabled',C['border']),('active',C['hover'])],foreground=[('disabled',C['secondary']),('!disabled',C['surface'])])
-        style.configure('TEntry',padding=(u(8),u(7)),fieldbackground=C['bg'],bordercolor=C['border'],lightcolor=C['border'],darkcolor=C['border'])
-        style.configure('TCombobox',padding=(u(8),u(6)),fieldbackground=C['bg'],arrowsize=u(12))
-        style.map('TCombobox',fieldbackground=[('readonly',C['bg'])],foreground=[('readonly',C['text'])])
+        style.configure('TEntry',padding=(u(8),u(7)),fieldbackground=C['bg'],foreground=C['text'],bordercolor=C['border'],lightcolor=C['border'],darkcolor=C['border'])
+        style.configure('TCombobox',padding=(u(8),u(6)),fieldbackground=C['bg'],background=C['bg'],foreground=C['text'],bordercolor=C['border'],arrowsize=u(12))
+        style.map('TCombobox',fieldbackground=[('readonly',C['bg'])],foreground=[('readonly',C['text'])],background=[('readonly',C['bg'])])
         style.configure('Mode.TRadiobutton',padding=(u(12),u(8)),background=C['bg'])
         style.map('Mode.TRadiobutton',background=[('selected',C['tint'])],foreground=[('selected',C['action'])])
+        style.configure('Theme.TCheckbutton',padding=(u(8),u(6)),background=C['surface'],foreground=C['secondary'])
+        style.map('Theme.TCheckbutton',background=[('active',C['surface'])],foreground=[('selected',C['action'])])
         style.configure('Horizontal.TProgressbar',background=C['action'],troughcolor=C['bg'],borderwidth=0,thickness=u(6))
+        style.configure('TScrollbar',background=C['bg'],troughcolor=C['surface'],
+                        arrowcolor=C['secondary'],bordercolor=C['border'])
+        style.map('TScrollbar',background=[('active',C['border'])])
+        style.configure('Treeview',font=getattr(self, '_queue_font', (FONT,-u(13))),
+                        rowheight=u(30),background=C['surface'],fieldbackground=C['surface'],
+                        foreground=C['text'],bordercolor=C['border'])
+        style.configure('Treeview.Heading',background=C['bg'],foreground=C['secondary'],
+                        relief='flat')
+        style.map('Treeview',background=[('selected',C['tint'])],
+                  foreground=[('selected',C['text'])])
+        style.configure('Quiet.TButton', background=C['surface'], foreground=C['muted'],
+                        borderwidth=0, relief='flat', padding=(u(8),u(6)))
+        style.map('Quiet.TButton', background=[('active',C['tint'])],
+                  foreground=[('active',C['action'])])
+        style.configure('TNotebook', background=C['surface'], borderwidth=0)
+        style.configure('TNotebook.Tab', background=C['bg'], foreground=C['secondary'], padding=(u(16),u(8)))
+        style.map('TNotebook.Tab', background=[('selected',C['tint'])], foreground=[('selected',C['action'])])
+        style.configure('QueueAction.TButton', font=(FONT,-u(12),'bold'),
+                        padding=(u(4),0), background=C['tint'], foreground=C['action'],
+                        bordercolor=C['action'], borderwidth=1, relief='solid')
+        style.map('QueueAction.TButton', background=[('disabled',C['bg']),('pressed',C['action']),('active',C['hover'])],
+                  foreground=[('disabled',C['muted']),('pressed',C['surface']),('active',C['surface'])])
 
     def _set_icon(self):
         assets=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))/'assets'
@@ -298,13 +370,69 @@ class DesktopUI:
             style.map(custom, **maps)
         style.configure(custom, background=base, foreground=foreground)
         button.configure(style=custom)
-        state = {'style': custom, 'base': base, 'current': base,
-                 'hover': hover_color or C['hover'], 'after': None}
+        state = {'style': custom, 'source_style': original, 'base': base, 'current': base,
+                 'hover_color': hover_color, 'hover': hover_color or C['hover'], 'after': None}
         button.bind('<Enter>', lambda _event, w=button: self._animate_button_color(w, True), add='+')
         button.bind('<Leave>', lambda _event, w=button: self._animate_button_color(w, False), add='+')
         button.bind('<ButtonPress-1>', lambda _event, w=button: self._animate_button_color(w, True, pressed=True), add='+')
         button.bind('<ButtonRelease-1>', lambda _event, w=button: self._animate_button_color(w, bool(w.winfo_containing(*w.winfo_pointerxy()) == w)), add='+')
         button._djigraft_hover_state = state
+
+    def _walk_widgets(self, parent=None):
+        for child in (parent or self).winfo_children():
+            yield child
+            yield from self._walk_widgets(child)
+
+    def _sync_hover_button_styles(self):
+        style = ttk.Style(self)
+        for button in self._walk_widgets():
+            state = getattr(button, '_djigraft_hover_state', None)
+            if not state:
+                continue
+            source = state['source_style']
+            custom = state['style']
+            layout = style.layout(source)
+            if layout:
+                style.layout(custom, layout)
+            configured = style.configure(source) or {}
+            if configured:
+                style.configure(custom, **configured)
+            maps = style.map(source) or {}
+            maps.pop('background', None)
+            if maps:
+                style.map(custom, **maps)
+            state['base'] = style.lookup(source, 'background') or C['surface']
+            state['hover'] = state['hover_color'] or C['hover']
+            state['current'] = state['base']
+            style.configure(custom, background=state['base'],
+                            foreground=style.lookup(source, 'foreground') or C['text'])
+
+    def _toggle_theme(self):
+        self._theme_name = 'dark' if self.dark_mode.get() else 'light'
+        C.clear(); C.update(colors_for(self._theme_name))
+        self._set_theme()
+        self.configure(bg=C['bg'])
+        for widget in self._walk_widgets():
+            if isinstance(widget, RoundedActionButton):
+                widget.apply_theme()
+            elif isinstance(widget, HelpHint):
+                widget.apply_theme()
+            elif isinstance(widget, tk.Text):
+                widget.configure(bg=C['bg'], fg=C['secondary'], insertbackground=C['text'],
+                                 selectbackground=C['action'], selectforeground=C['surface'])
+        self.status_label.configure(bg=C['tint'], fg=C['action'])
+        self.queue_tree.tag_configure('waiting', foreground=C['text'])
+        self.queue_tree.tag_configure('running', foreground=C['action'])
+        self.queue_tree.tag_configure('success', foreground=C['success'])
+        self.queue_tree.tag_configure('failed', foreground=C['error'])
+        self.queue_tree.tag_configure('action_hover', background=C['surface'], foreground=C['text'])
+        self._queue_hover_color = C['surface']
+        self._hide_queue_tooltip()
+        self._sync_hover_button_styles()
+        try:
+            save_theme_preference(self._theme_name)
+        except OSError as exc:
+            self.hint_var.set(f'主题已切换，但设置未能保存：{exc}')
 
     def _animate_button_color(self, button, hovering, pressed=False):
         state = getattr(button, '_djigraft_hover_state', None)
@@ -336,6 +464,11 @@ class DesktopUI:
         ttk.Label(header,text='DJI Graft',style='Title.TLabel').grid(row=0,column=1,sticky='w')
         ttk.Label(header,text='让你的视频，在相机里播放',style='Muted.TLabel').grid(row=1,column=1,sticky='w')
         ttk.Label(header,text=VERSION+'  ·  Windows',style='Muted.TLabel').grid(row=0,column=2,rowspan=2)
+        ttk.Checkbutton(header, text='深色模式', variable=self.dark_mode,
+                        command=self._toggle_theme, style='Theme.TCheckbutton').grid(
+                            row=0, column=3, rowspan=2, padx=(u(18), 0))
+        ttk.Button(header, text='关于我们', style='Quiet.TButton',
+                   command=lambda: show_about(self, VERSION)).grid(row=0,column=4,rowspan=2,padx=(u(8),0))
 
         body=ttk.Frame(self,style='Page.TFrame',padding=(u(16),u(12)))
         body.grid(row=1,column=0,sticky='nsew');body.rowconfigure(0,weight=1)
@@ -347,14 +480,26 @@ class DesktopUI:
             b=ttk.Radiobutton(modebar,text=title,variable=self.mode,value=value,command=self._on_mode_change,style='Mode.TRadiobutton')
             b.grid(row=0,column=col,sticky='ew',padx=(0,u(8)));self._controls.append(b)
 
-        def path_group(row,title,var,command,button):
+        def path_group(row,title,var,command,button,help_text=None):
             f=ttk.Frame(left);f.grid(row=row,column=0,sticky='ew',pady=(0,u(12)));f.columnconfigure(0,weight=1)
-            title_label=ttk.Label(f,text=title,style='Section.TLabel');title_label.grid(row=0,column=0,columnspan=2,sticky='w',pady=(0,u(4)))
+            f.columnconfigure(1, minsize=u(112))
+            heading=ttk.Frame(f);heading.grid(row=0,column=0,columnspan=2,sticky='w',pady=(0,u(4)))
+            title_label=ttk.Label(heading,text=title,style='Section.TLabel');title_label.grid(row=0,column=0,sticky='w')
+            if help_text:
+                HelpHint(heading,help_text,self.ui_scale).grid(row=0,column=1,sticky='w',padx=(u(6),0))
             e=self._entry(f,var);e.grid(row=1,column=0,sticky='ew',padx=(0,u(8)))
-            b=self._button(f,button,command);b.grid(row=1,column=1)
+            b=self._button(f,button,command);b.grid(row=1,column=1,sticky='ew')
             return f,title_label,e,b
-        self.frm_ref,_,self.ref_entry,self.ref_btn=path_group(1,'01  相机参考视频',self.ref_path,self._pick_ref,'选择参考')
-        ttk.Label(self.frm_ref,text='选择相机拍摄的原生 MP4，沿用其格式参数。',style='Muted.TLabel').grid(row=2,column=0,columnspan=2,sticky='w',pady=(u(4),0))
+        reference_help = ('参考视频请使用相机直接拍摄、未经剪辑或二次转码的原生 MP4，并保留音轨。'
+                          '待转换视频会按参考视频的分辨率、帧率和音频采样率、声道数重新编码，'
+                          '再移植到其相机容器结构中。')
+        self.frm_ref,_,self.ref_entry,self.ref_btn=path_group(
+            1,'01  相机参考视频',self.ref_path,self._pick_ref,'选择参考',reference_help)
+        self.ref_specs_label=ttk.Label(
+            self.frm_ref,text='',
+            style='Muted.TLabel',wraplength=u(620),justify='left')
+        self.ref_specs_label.grid(row=2,column=0,columnspan=2,sticky='w',pady=(u(4),0))
+        self.ref_specs_label.grid_remove()
         self.frm_input,self.input_title,self.input_entry,self.input_btn=path_group(2,'02  待转换视频',self.input_path,self._pick_input,'选择视频')
         self.frm_output,self.output_title,self.output_entry,self.output_btn=path_group(3,'03  输出文件',self.output_path,self._pick_output,'保存到')
         self.frm_naming=ttk.Frame(left);self.frm_naming.grid(row=4,column=0,sticky='ew',pady=(0,u(12)))
@@ -368,27 +513,47 @@ class DesktopUI:
         self.queue_frame = ttk.Frame(left)
         self.queue_frame.grid(row=5, column=0, sticky='nsew', pady=(0, u(8)))
         self.queue_frame.columnconfigure(0, weight=1); self.queue_frame.rowconfigure(1, weight=1)
-        ttk.Label(self.queue_frame, text='批量队列（双击可编辑输出文件名）', style='Section.TLabel').grid(row=0, column=0, sticky='w', pady=(0, u(6)))
+        queue_header = ttk.Frame(self.queue_frame)
+        queue_header.grid(row=0, column=0, sticky='ew', pady=(0, u(6)))
+        queue_header.columnconfigure(0, weight=1)
+        ttk.Label(queue_header, text='批量队列 · 双击改名', style='Section.TLabel').grid(row=0, column=0, sticky='w')
+        ttk.Label(queue_header, text='排序', style='Muted.TLabel').grid(row=0, column=1, padx=(u(8), u(4)))
+        self.queue_sort_box = ttk.Combobox(queue_header, textvariable=self.queue_sort,
+                                         values=list(QUEUE_SORTS), state='readonly', width=21)
+        self.queue_sort_box.grid(row=0, column=2, sticky='e')
+        self.queue_sort_box.bind('<<ComboboxSelected>>', self._sort_queue)
+        self._controls.append(self.queue_sort_box)
         tree_wrap = ttk.Frame(self.queue_frame); tree_wrap.grid(row=1, column=0, sticky='nsew'); tree_wrap.columnconfigure(0, weight=1); tree_wrap.rowconfigure(0, weight=1)
-        self.queue_tree = ttk.Treeview(tree_wrap, columns=('source', 'output', 'status', 'action'), show='headings', height=7)
-        for col, title, width in (('source', '原视频', 180), ('output', '输出文件名', 220), ('status', '状态', 90), ('action', '操作', 110)):
+        self.queue_tree = ttk.Treeview(tree_wrap, columns=('source', 'output', 'status', 'action'), show='headings', height=8)
+        self._queue_font=tkfont.Font(root=self,family=FONT,size=-u(13))
+        ttk.Style(self).configure('Treeview',font=self._queue_font,rowheight=u(30))
+        for col, title, width in (('source', '原视频', 180), ('output', '输出文件名', 270), ('status', '状态', 82), ('action', '操作', 108)):
             self.queue_tree.heading(col, text=title)
-            self.queue_tree.column(col, width=u(width), minwidth=u(width), anchor='w', stretch=(col in ('source', 'output')))
+            self.queue_tree.column(col, width=u(width), minwidth=u({'source':100,'output':150}.get(col,width)), anchor='w', stretch=(col in ('source', 'output')))
         self.queue_tree.grid(row=0, column=0, sticky='nsew')
         self.queue_tree.tag_configure('waiting', foreground=C['text'])
         self.queue_tree.tag_configure('running', foreground=C['action'])
-        self.queue_tree.tag_configure('success', foreground='#168f4b')
+        self.queue_tree.tag_configure('success', foreground=C['success'])
         self.queue_tree.tag_configure('failed', foreground=C['error'])
         self.queue_tree.tag_configure('action_hover', background=C['surface'], foreground=C['text'])
         self._queue_hover_anim_id = None
         self._queue_hover_color = C['surface']
+        self._queue_tooltip = None
+        self._queue_tooltip_text = None
+        self._queue_tooltip_hide_id = None
         queue_scroll = ttk.Scrollbar(tree_wrap, orient='vertical', command=self.queue_tree.yview)
         queue_scroll.grid(row=0, column=1, sticky='ns')
-        self.queue_tree.configure(yscrollcommand=queue_scroll.set)
+        self._queue_action_buttons = []
+        self._queue_actions_after = None
+        def scroll_changed(first,last):
+            queue_scroll.set(first,last)
+            self._schedule_queue_actions()
+        self.queue_tree.configure(yscrollcommand=scroll_changed)
+        self.queue_tree.bind('<Configure>', lambda _e: self._schedule_queue_actions(), add='+')
         self.queue_tree.bind('<Double-1>', self._edit_queue_name)
         self.queue_tree.bind('<Button-1>', self._queue_action_click)
         self.queue_tree.bind('<Motion>', self._queue_hover_motion)
-        self.queue_tree.bind('<Leave>', lambda _event: self._set_queue_hover(None))
+        self.queue_tree.bind('<Leave>', self._queue_leave)
         self.queue_frame.grid_remove()
 
         quality=ttk.Frame(right);quality.grid(row=0,column=0,sticky='ew',pady=(0,u(12)));quality.columnconfigure(0,weight=1);quality.columnconfigure(1,weight=1)
@@ -464,7 +629,40 @@ class DesktopUI:
 
     def _pick_ref(self):
         p=filedialog.askopenfilename(parent=self,title='选择相机原生参考视频',filetypes=[('MP4 视频','*.mp4 *.MP4'),('所有文件','*.*')])
-        if p:self.ref_path.set(p)
+        if p:
+            self.ref_path.set(p)
+            self._load_reference_specs(p)
+
+    def _load_reference_specs(self, path):
+        self._reference_probe_id += 1
+        probe_id = self._reference_probe_id
+        self._reference_probe_pending = False
+        if not path:
+            self.ref_specs_label.config(text='')
+            self.ref_specs_label.grid_remove()
+            return
+        self.ref_specs_label.grid()
+        self.ref_specs_label.config(text='正在读取参考视频规格…')
+
+        def probe():
+            ffmpeg, ffprobe = find_ffmpeg()
+            if not ffmpeg or not ffprobe:
+                self.msg_queue.put(('reference_specs', (
+                    path, probe_id, None, '等待 FFmpeg/ffprobe 就绪；准备后会自动读取。')))
+                return
+            try:
+                configure_ffmpeg(ffmpeg, ffprobe)
+                specs = format_reference_specs(ffprobe_json(path))
+                self.msg_queue.put(('reference_specs', (path, probe_id, specs, None)))
+            except Exception as exc:
+                error = str(exc).splitlines()[0] or '无法读取参考视频规格。'
+                self.msg_queue.put(('reference_specs', (path, probe_id, None, error)))
+
+        threading.Thread(target=probe, daemon=True).start()
+
+    def _retry_reference_probe_if_ready(self):
+        if self._reference_probe_pending and self.ref_path.get():
+            self._load_reference_specs(self.ref_path.get())
 
     def _pick_input(self):
         p = filedialog.askopenfilename(parent=self, title='选择待转换视频') if self.mode.get() == 'single' else filedialog.askdirectory(parent=self, title='选择输入文件夹')
@@ -476,6 +674,7 @@ class DesktopUI:
 
     def _refresh_batch_queue(self):
         if not hasattr(self, 'queue_tree') or self.mode.get() != 'batch': return
+        self._hide_queue_tooltip()
         try:
             videos = find_input_videos(Path(self.input_path.get())) if Path(self.input_path.get()).is_dir() else []
             previous = {str(item.source): item for item in self._batch_queue}
@@ -483,18 +682,55 @@ class DesktopUI:
             for item in defaults:
                 old = previous.get(str(item.source))
                 if old:
-                    if old.custom_name:
-                        item.output_name = old.output_name
-                        item.custom_name = True
-                    if item.output_name == old.output_name:
-                        item.status, item.error = old.status, old.error
-            self._batch_queue = defaults
+                    item.output_name = old.output_name
+                    item.custom_name = old.custom_name
+                    item.status, item.error = old.status, old.error
+            self._batch_queue = sort_batch_queue(defaults, QUEUE_SORTS[self.queue_sort.get()])
         except (OSError, ValueError):
             self._batch_queue = []
-        self._failed_queue = []
+        self._failed_queue = [item for item in self._batch_queue if item.status == '失败']
         for row in self.queue_tree.get_children(): self.queue_tree.delete(row)
         for item in self._batch_queue:
             self.queue_tree.insert('', 'end', iid=str(item.source), values=(item.source.name, item.output_name, item.status, self._queue_action_text(item.status)), tags=(self._queue_status_tag(item.status),))
+        self._schedule_queue_actions()
+
+    def _schedule_queue_actions(self):
+        if self._queue_actions_after is None:
+            self._queue_actions_after = self.after_idle(self._layout_queue_actions)
+
+    def _layout_queue_actions(self):
+        """Reuse real buttons over visible action cells, including after scrolling."""
+        self._queue_actions_after = None
+        visible = []
+        height = self.queue_tree.winfo_height()
+        width = self.queue_tree.winfo_width()
+        for item in self._batch_queue:
+            box = self.queue_tree.bbox(str(item.source), 'action')
+            if box and box[1] >= 0 and box[1]+box[3] <= height and box[0]+box[2] <= width:
+                visible.append((item, box))
+        while len(self._queue_action_buttons) < len(visible):
+            self._queue_action_buttons.append(ttk.Button(self.queue_tree, style='QueueAction.TButton'))
+        for index, button in enumerate(self._queue_action_buttons):
+            if index >= len(visible):
+                button.place_forget()
+                continue
+            item, (x,y,w,h) = visible[index]
+            button.configure(text=self._queue_action_text(item.status),
+                             command=lambda selected=item: self._convert_single_queue_item(selected),
+                             state='disabled' if self._running else 'normal',
+                             cursor='arrow' if self._running else 'hand2')
+            button.place(x=x+self.u(3), y=y+self.u(2), width=w-self.u(6), height=h-self.u(4))
+
+    def _sort_queue(self, _event=None):
+        if self._running:
+            return
+        self._hide_queue_tooltip()
+        self._batch_queue = sort_batch_queue(self._batch_queue, QUEUE_SORTS[self.queue_sort.get()])
+        for index, item in enumerate(self._batch_queue):
+            self.queue_tree.move(str(item.source), '', index)
+        self._failed_queue = [item for item in self._batch_queue if item.status == '失败']
+        self.hint_var.set('已按所选方式排序，转换将按队列顺序执行；输出文件名保持不变。')
+        self._schedule_queue_actions()
 
     @staticmethod
     def _queue_action_text(status):
@@ -510,6 +746,7 @@ class DesktopUI:
             self.queue_tree.set(row, 'status', item.status)
             self.queue_tree.set(row, 'action', self._queue_action_text(item.status))
             self.queue_tree.item(row, tags=(self._queue_status_tag(item.status),))
+            self._schedule_queue_actions()
 
     def _apply_queue_naming(self):
         """Prefix/number edits intentionally rename every queued output."""
@@ -522,11 +759,15 @@ class DesktopUI:
             return
         prefix = self.prefix.get() or 'DJI_'
         for index, item in enumerate(self._batch_queue):
-            item.output_name = f'{prefix}{start + index:04d}.MP4'
+            name = f'{prefix}{start + index:04d}.MP4'
+            if item.output_name != name:
+                item.status, item.error = '等待转换', ''
+            item.output_name = name
             item.custom_name = False
         self._refresh_batch_queue()
 
     def _edit_queue_name(self, event):
+        self._hide_queue_tooltip()
         row = self.queue_tree.identify_row(event.y)
         col = self.queue_tree.identify_column(event.x)
         if not row or col != '#2' or self._running: return
@@ -561,6 +802,56 @@ class DesktopUI:
         row = self.queue_tree.identify_row(event.y)
         col = self.queue_tree.identify_column(event.x)
         self._set_queue_hover(row if row and col == '#4' else None)
+        self._update_queue_name_tooltip(event, row, col)
+
+    def _queue_leave(self, _event=None):
+        self._set_queue_hover(None)
+        self._schedule_queue_tooltip_hide()
+
+    def _update_queue_name_tooltip(self, event, row, column):
+        if not row or column != '#2':
+            self._hide_queue_tooltip()
+            return
+        text = self.queue_tree.set(row, 'output')
+        cell = self.queue_tree.bbox(row, column)
+        if not cell or self._queue_font.measure(text) <= cell[2] - self.u(20):
+            self._hide_queue_tooltip()
+            return
+        if self._queue_tooltip_text == text and self._queue_tooltip is not None:
+            self._cancel_queue_tooltip_hide()
+            return
+
+        self._hide_queue_tooltip()
+        tip = self._queue_tooltip = tk.Toplevel(self)
+        self._queue_tooltip_text = text
+        tip.wm_overrideredirect(True)
+        tip.configure(bg=C['text'])
+        width = min(max(self.u(260), self._queue_font.measure(text) + self.u(20)), self.u(520))
+        label = tk.Label(tip, text=text, justify='left', wraplength=width,
+                         bg=C['text'], fg=C['surface'], padx=self.u(10), pady=self.u(7),
+                         font=(FONT, -self.u(12)))
+        label.pack()
+        tip.geometry(f'+{event.x_root+12}+{event.y_root+14}')
+        tip.bind('<Enter>', lambda _event: self._cancel_queue_tooltip_hide(), add='+')
+        tip.bind('<Leave>', lambda _event: self._schedule_queue_tooltip_hide(), add='+')
+
+    def _cancel_queue_tooltip_hide(self):
+        if self._queue_tooltip_hide_id is not None:
+            try: self.after_cancel(self._queue_tooltip_hide_id)
+            except tk.TclError: pass
+            self._queue_tooltip_hide_id = None
+
+    def _schedule_queue_tooltip_hide(self):
+        if self._queue_tooltip is not None and self._queue_tooltip_hide_id is None:
+            self._queue_tooltip_hide_id = self.after(350, self._hide_queue_tooltip)
+
+    def _hide_queue_tooltip(self):
+        self._cancel_queue_tooltip_hide()
+        if self._queue_tooltip is not None:
+            try: self._queue_tooltip.destroy()
+            except tk.TclError: pass
+            self._queue_tooltip = None
+            self._queue_tooltip_text = None
 
     def _set_queue_hover(self, row):
         if getattr(self, '_queue_hover_row', None) == row:
@@ -585,16 +876,16 @@ class DesktopUI:
             self._queue_hover_color = C['surface']
 
     def _animate_queue_hover(self, start, target, frame=1):
-        color = self._mix_color(start, target, frame / 4)
+        color = self._mix_color(start, target, 1 - (1 - frame / 10) ** 3)
         self.queue_tree.tag_configure('action_hover', background=color, foreground=C['text'])
         self._queue_hover_color = color
-        if frame < 4:
-            self._queue_hover_anim_id = self.after(8, lambda: self._animate_queue_hover(start, target, frame + 1))
+        if frame < 10:
+            self._queue_hover_anim_id = self.after(16, lambda: self._animate_queue_hover(start, target, frame + 1))
         else:
             self._queue_hover_anim_id = None
 
     def _convert_single_queue_item(self, item):
-        if self._running or self.mode.get() != 'batch':
+        if self._notice_pending or self._running or self.mode.get() != 'batch':
             return
         try:
             job = validate_form(dict(mode='batch', ref=self.ref_path.get(), inp=self.input_path.get(), out=self.output_path.get(),
@@ -656,13 +947,15 @@ class DesktopUI:
         self._running=running
         for w in self._controls:w.config(state='disabled' if running else 'normal')
         self.acceleration_box.config(state='disabled' if running else 'readonly')
+        self.queue_sort_box.config(state='disabled' if running else 'readonly')
         self.start_btn.config(state='disabled' if running else 'normal',text='正在处理…' if running else '开始转换  →')
         self.install_btn.config(state='disabled' if running else 'normal')
         self.open_btn.config(state='normal' if not running and self._open_dir else 'disabled')
         self.retry_btn.config(state='disabled' if running else ('normal' if self._failed_queue else 'disabled'))
+        self._schedule_queue_actions()
 
     def _install_ffmpeg(self):
-        if self._running:return
+        if self._notice_pending or self._running:return
         self._task_kind='install';self._had_error=False;self._set_running(True)
         self.progress_label.config(text='准备转换环境');self.hint_label.config(foreground=C['muted'])
         self.install_thread=threading.Thread(target=self._install_worker,daemon=True);self.install_thread.start()
@@ -675,7 +968,7 @@ class DesktopUI:
         finally:self.msg_queue.put(('done',None))
 
     def _start(self):
-        if self._running:return
+        if self._notice_pending or self._running:return
         skipped_items = []
         queue_items = None
         try:
@@ -714,7 +1007,7 @@ class DesktopUI:
         self.worker_thread.start()
 
     def _retry_failed(self):
-        if self._running or not self._failed_queue: return
+        if self._notice_pending or self._running or not self._failed_queue: return
         try:
             job = validate_form(dict(mode='batch', ref=self.ref_path.get(), inp=self.input_path.get(), out=self.output_path.get(), crf=self.crf.get(), max_bitrate=self.max_bitrate.get(), prefix=self.prefix.get(), start_number=self.start_number.get(), acceleration=MODES.get(self.acceleration.get(), '')))
             validate_queue_names(self._failed_queue)
@@ -746,13 +1039,41 @@ class DesktopUI:
                         self.progress_label.config(text=f'转换 {idx}/{total} · {pct:.0f}%')
                     else:
                         name,pct=payload;self.progress['value']=pct;self.progress_label.config(text=f'正在转码 · {pct:.0f}%')
+                elif kind=='progress_details':
+                    name,details,idx,total,remaining_duration=payload
+                    pct=details.get('percent') or 0
+                    speed=details.get('speed')
+                    duration=remaining_duration
+                    if duration is None and idx == 1 and total == 1:
+                        duration=details.get('duration_seconds')
+                    eta=estimate_remaining_seconds(duration,details.get('out_time_seconds'),speed)
+                    speed_label=f'速度 {speed:.2f}×' if speed is not None else '速度计算中'
+                    if total > 1:
+                        self.progress['value']=((idx-1)+pct/100)/total*100
+                        prefix=f'转换 {idx}/{total} · {pct:.0f}%'
+                    else:
+                        self.progress['value']=pct
+                        prefix=f'正在转码 · {pct:.0f}%'
+                    self.progress_label.config(text=f'{prefix} · {speed_label} · {format_eta(eta)}')
                 elif kind=='ffmpeg':
                     pct,msg=payload;self.progress['value']=pct;self.progress_label.config(text='准备转换环境');self.hint_var.set(msg)
                 elif kind=='env_checked':
                     good,version=payload
                     self.ffmpeg_status_var.set('● FFmpeg 已就绪' if good else '○ 缺少 FFmpeg · 开始时自动安装')
                     if version:self._log(version)
-                elif kind=='ffmpeg_ready':self.ffmpeg_status_var.set('● FFmpeg 已就绪')
+                    if good:self._retry_reference_probe_if_ready()
+                elif kind=='ffmpeg_ready':
+                    self.ffmpeg_status_var.set('● FFmpeg 已就绪')
+                    self._retry_reference_probe_if_ready()
+                elif kind=='reference_specs':
+                    path, probe_id, specs, error = payload
+                    if path == self.ref_path.get() and probe_id == self._reference_probe_id:
+                        waiting = error and error.startswith('等待 FFmpeg/ffprobe')
+                        self._reference_probe_pending = bool(waiting)
+                        text = error if error else f'参考规格：{specs}'
+                        self.ref_specs_label.config(text=text)
+                        if waiting and self.ffmpeg_status_var.get().startswith('● FFmpeg 已就绪'):
+                            self._retry_reference_probe_if_ready()
                 elif kind=='openable':self._open_dir=Path(payload)
                 elif kind=='queue_status':
                     source, status, error = payload

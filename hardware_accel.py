@@ -52,10 +52,15 @@ def probe_encoder(ffmpeg, encoder, targets, max_video_bitrate):
         return False, str(exc)
 
 
-def run_conversion(cmd, duration, label, progress_callback, show_progress):
+def run_conversion(cmd, duration, label, progress_callback, show_progress,
+                   progress_details_callback=None):
     from dji_graft import run_ffmpeg_with_progress, run
     if progress_callback is not None or show_progress:
-        run_ffmpeg_with_progress(cmd, duration, label, progress_callback)
+        run_ffmpeg_with_progress(cmd, duration, label, progress_callback,
+                                 progress_details_callback)
+    elif progress_details_callback is not None:
+        run_ffmpeg_with_progress(cmd, duration, label, None,
+                                 progress_details_callback)
     else:
         result = run(cmd)
         if result.returncode:
@@ -144,7 +149,8 @@ def validate_output(ffprobe, output, targets):
 
 
 def try_hardware(input_path, out_path, targets, ffmpeg, ffprobe, acceleration,
-                 max_video_bitrate, duration, label, progress_callback, show_progress, status):
+                 max_video_bitrate, duration, label, progress_callback, show_progress,
+                 status, progress_details_callback=None):
     if acceleration not in ('auto', *ENCODERS):
         raise ValueError('未知显卡加速选项：' + str(acceleration))
     if not targets.get('video_timescale'):
@@ -171,7 +177,8 @@ def try_hardware(input_path, out_path, targets, ffmpeg, ffprobe, acceleration,
                    '-video_track_timescale', str(targets['video_timescale']),
                    '-movflags', '+faststart', str(temporary)]
             try:
-                run_conversion(cmd, duration, label, progress_callback, show_progress)
+                run_conversion(cmd, duration, label, progress_callback, show_progress,
+                               progress_details_callback)
                 status('整理 ' + ENCODERS[encoder] + ' 相机兼容码流头（不重新编码画面和音频）...')
                 normalized = Path(folder) / 'normalized.mp4'
                 if encoder == 'h264_amf':
@@ -187,5 +194,12 @@ def try_hardware(input_path, out_path, targets, ffmpeg, ffprobe, acceleration,
                 status(ENCODERS[encoder] + ' 编码或校验失败：' + str(exc)[-500:])
                 if progress_callback is not None:
                     progress_callback(0)
+                if progress_details_callback is not None:
+                    progress_details_callback({
+                        'out_time_seconds': 0.0,
+                        'speed': None,
+                        'percent': 0.0,
+                        'duration_seconds': duration,
+                    })
     status('无可用硬件编码结果，自动回退原版 CPU 编码。')
     return False

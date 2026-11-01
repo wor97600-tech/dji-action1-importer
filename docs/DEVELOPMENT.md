@@ -4,7 +4,7 @@ Python 3.10+（推荐 3.12，含 tkinter）。运行时仅依赖标准库及外�
 
 ## 运行与构建
 
-运行 python dji_graft_gui.py，或双击 start_windows.cmd。执行 build.ps1 / build.bat 打包，输出 dist/DJIGraft-5.0-Windows-x64.exe，包含图标及版本资源，不包含 FFmpeg。
+运行 python dji_graft_gui.py，或双击 start_windows.cmd。执行 build.ps1 / build.bat 打包，输出 dist/DJIGraft-5.2-Windows-x64.exe，包含图标及版本资源，不包含 FFmpeg。
 
 ## 模块职责
 
@@ -24,4 +24,4 @@ Python 3.10+（推荐 3.12，含 tkinter）。运行时仅依赖标准库及外�
 - DJI_TEST_BAD_NVENC：旧 NVIDIA 问题样片，用于码流头回归。
 - DJI_TEST_OUTPUT、DJI_TEST_CONFIRMED：转码中间文件、已由相机确认的输出；同时提供参考文件。
 
-私人样片、构建缓存和日志放在被忽略的 _smoke/，不提交仓库。发布说明位于 docs/releases/v5.0.md。本次只发布 Windows，手机端留待后续更新。
+私人样片、构建缓存和日志放在被忽略的 _smoke/，不提交仓库。发布说明位于 docs/releases/v5.2.md。本次只发布 Windows，手机端留待后续更新。

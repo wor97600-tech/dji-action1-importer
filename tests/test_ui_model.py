@@ -93,4 +93,90 @@ class FormTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_queue_names(queue)
 
+    def test_reference_specs_show_video_and_audio_parameters(self):
+        from ui_model import format_reference_specs
+
+        info = {'streams': [
+            {'codec_type': 'video', 'codec_name': 'h264', 'width': 3840,
+             'height': 2160, 'avg_frame_rate': '30000/1001'},
+            {'codec_type': 'audio', 'codec_name': 'aac', 'sample_rate': '48000',
+             'channels': 2},
+        ]}
+
+        self.assertEqual(
+            format_reference_specs(info),
+            '3840×2160 · 29.97 fps · H.264 · AAC 48 kHz / 2 ch',
+        )
+
+    def test_reference_specs_report_missing_audio_track(self):
+        from ui_model import format_reference_specs
+
+        info = {'streams': [
+            {'codec_type': 'video', 'codec_name': 'h264', 'width': 1920,
+             'height': 1080, 'r_frame_rate': '30/1'},
+        ]}
+
+        self.assertEqual(
+            format_reference_specs(info),
+            '1920×1080 · 30 fps · H.264 · 无音轨',
+        )
+
+    def test_rounded_button_redraw_recenters_text_and_smooths_capsule(self):
+        from desktop_ui import RoundedActionButton
+
+        class CanvasStub:
+            _draw_shape = RoundedActionButton._draw_shape
+
+            def __init__(self):
+                self.width = 100
+                self.height = 32
+                self._shape = 'shape'
+                self._label = 'label'
+                self.coords_by_item = {}
+
+            def winfo_reqwidth(self):
+                return self.width
+
+            def winfo_reqheight(self):
+                return self.height
+
+            def winfo_width(self):
+                return 1
+
+            def winfo_height(self):
+                return 1
+
+            def coords(self, item, *values):
+                if values:
+                    self.coords_by_item[item] = values
+                return self.coords_by_item.get(item)
+
+            def itemconfigure(self, *_args, **_kwargs):
+                pass
+
+            def tag_raise(self, *_args):
+                pass
+
+        button = CanvasStub()
+        button._draw_shape('#00ff00')
+        self.assertEqual(button.coords_by_item['label'], (50, 16))
+        self.assertGreaterEqual(len(button.coords_by_item['shape']), 140)
+
+        button.width = 180
+        button._draw_shape('#00ff00')
+        self.assertEqual(button.coords_by_item['label'], (90, 16))
+
+    def test_estimated_remaining_time_uses_media_speed_and_processed_duration(self):
+        from ui_model import estimate_remaining_seconds, format_eta
+
+        self.assertEqual(estimate_remaining_seconds(300, 150, 1.5), 100)
+        self.assertEqual(format_eta(90), '预计剩余 01:30')
+
+    def test_estimated_remaining_time_waits_for_valid_speed(self):
+        from ui_model import estimate_remaining_seconds, format_eta
+
+        self.assertIsNone(estimate_remaining_seconds(300, 150, 0))
+        self.assertIsNone(estimate_remaining_seconds(300, 150, None))
+        self.assertEqual(format_eta(None), '预计剩余计算中')
+
 if __name__=='__main__':unittest.main()
