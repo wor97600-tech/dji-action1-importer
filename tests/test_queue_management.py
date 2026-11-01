@@ -14,7 +14,8 @@ class QueueManagementTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
-        self.root = Path(self.folder.name)
+        # Windows runners can expose TEMP through an 8.3 short-path alias.
+        self.root = Path(self.folder.name).resolve()
         self.inputs = self.root / 'inputs'
         self.inputs.mkdir()
         for name in ('a.mp4', 'b.mp4', 'c.mp4'):
@@ -39,7 +40,10 @@ class QueueManagementTests(unittest.TestCase):
         self.app.update_idletasks()
         self.app._file_drop._destroy(SimpleNamespace(widget=self.app.queue_tree))
         for timer in self.app.tk.call('after', 'info'):
-            self.app.after_cancel(timer)
+            # Cancel scheduling only. Each owning widget deletes its registered
+            # Tcl commands during destroy; root.after_cancel would delete child
+            # commands while leaving them in the child's cleanup bookkeeping.
+            self.app.tk.call('after', 'cancel', timer)
         self.app.destroy()
 
     def test_dropped_queue_without_input_folder_can_start_and_refresh(self):
